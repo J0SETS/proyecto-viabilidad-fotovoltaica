@@ -1,0 +1,8 @@
+streamlit
+pvlib
+pandas
+plotly
+matplotlib
+numpy
+seaborn
+calendar
