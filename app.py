@@ -172,7 +172,7 @@ with st.sidebar:
     )
     altura = st.number_input(
         "Altura del Panel (m)", min_value=0.0,
-        value=1.5, step=0.1, format="%.2f",
+        value=1400, step=0.1, format="%.2f",
         help="Altura del panel sobre el nivel del suelo.",
     )
 
