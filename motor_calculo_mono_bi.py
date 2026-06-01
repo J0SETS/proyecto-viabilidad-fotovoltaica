@@ -1,18 +1,11 @@
-# =============================================================================
-#  motor_calculo.py — Motor de simulación fotovoltaica
-#  Dependencias: pvlib >= 0.9, pandas >= 1.5, numpy
-# =============================================================================
-
 import pandas as pd
 import numpy as np
 import pvlib
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 
 
-# =============================================================================
 #  CATÁLOGO DE PANELES
 #  Cada entrada define los parámetros que consume calcular_viabilidad().
-# =============================================================================
 
 PANELES = {
     "monofacial": {
@@ -45,30 +38,9 @@ def calcular_viabilidad(
     tipo_panel: str = "monofacial",
     gb: float = 0.15,
 ):
-    """
-    Simula un año completo de generación solar y su impacto en la curva de demanda.
 
-    Parámetros
-    ----------
-    lat, lon    : float  — Coordenadas geográficas del sitio.
-    altura      : float  — Altitud sobre el nivel del mar en metros.
-    df_demanda  : pd.DataFrame — DataFrame con al menos una columna numérica de demanda
-                                 (preferiblemente llamada 'Demanda_kW').
-    tipo_panel  : str    — Clave del diccionario PANELES: 'monofacial' | 'bifacial_jinko'.
-    gb          : float  — Ganancia trasera bifacial como fracción decimal (ej. 0.15 = 15 %).
-                           Solo se aplica cuando tipo_panel == 'bifacial_jinko'.
+    # SELECCIÓN DE PANEL
 
-    Retorna
-    -------
-    df_motor     : pd.DataFrame con columnas:
-                   ['Fecha_Hora', 'Demanda_kW', 'Gtot_POA_Wm2',
-                    'Generacion_Solar_kW', 'Demanda_Post_Inyeccion_Solar_kW']
-    energia_anual : float — kWh solares generados en el año simulado.
-    """
-
-    # -------------------------------------------------------------------------
-    # 0. SELECCIÓN DE PANEL
-    # -------------------------------------------------------------------------
     if tipo_panel not in PANELES:
         raise ValueError(
             f"tipo_panel='{tipo_panel}' no reconocido. "
@@ -76,9 +48,9 @@ def calcular_viabilidad(
         )
     panel = PANELES[tipo_panel]
 
-    # -------------------------------------------------------------------------
-    # 1. ÍNDICE TEMPORAL  (año completo, intervalos de 15 min, zona horaria local)
-    # -------------------------------------------------------------------------
+
+    # ÍNDICE TEMPORAL  (año completo, intervalos de 15 min, zona horaria local)
+
     tz = 'America/Mexico_City'
     tiempos = pd.date_range(
         start='2026-12-21 00:00',
@@ -89,14 +61,13 @@ def calcular_viabilidad(
     # Versión sin zona horaria para el DataFrame final (más amigable para Plotly)
     tiempos_naive = tiempos.tz_localize(None)
 
-    # -------------------------------------------------------------------------
-    # 2. POSICIÓN SOLAR
-    # -------------------------------------------------------------------------
+
+    # POSICIÓN SOLAR
+
     sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon)
 
-    # -------------------------------------------------------------------------
-    # 3. IRRADIANCIA EN CIELO DESPEJADO (modelo Ineichen)
-    # -------------------------------------------------------------------------
+
+    # IRRADIANCIA EN CIELO DESPEJADO (modelo Ineichen)
     airmass = pvlib.atmosphere.get_relative_airmass(sol['apparent_zenith'])
     airmass_abs = pvlib.atmosphere.get_absolute_airmass(
         airmass, pvlib.atmosphere.alt2pres(altura)
@@ -119,15 +90,11 @@ def calcular_viabilidad(
         dhi=clearsky['dhi'],
     )
 
-    # -------------------------------------------------------------------------
-    # 4. CONSTRUCCIÓN DEL DATAFRAME BASE
-    # -------------------------------------------------------------------------
+    # CONSTRUCCIÓN DEL DATAFRAME BASE
     df_motor = pd.DataFrame(index=tiempos_naive)
     df_motor['Gtot_POA_Wm2'] = irradiance_poa['poa_global'].values
 
-    # -------------------------------------------------------------------------
-    # 5. ALINEACIÓN DE LA CURVA DE DEMANDA
-    # -------------------------------------------------------------------------
+    # ALINEACIÓN DE LA CURVA DE DEMANDA
     try:
         if isinstance(df_demanda, str):
             df_demanda = pd.read_csv(df_demanda, index_col=0, parse_dates=True)
@@ -151,9 +118,7 @@ def calcular_viabilidad(
         rng = np.random.default_rng(seed=42)
         df_motor['Demanda_kW'] = rng.uniform(150, 300, len(tiempos_naive))
 
-    # -------------------------------------------------------------------------
     # 6. MODELADO ENERGÉTICO
-    # -------------------------------------------------------------------------
     gamma_pdc        = panel['gamma_pdc']
     potencia_pico_dc = panel['potencia_pico_dc']   # Wp base del sistema
 
@@ -165,7 +130,6 @@ def calcular_viabilidad(
     #
     # donde G_b es la ganancia trasera configurada por el usuario.
     # Para el monofacial G_b = 0, por lo que potencia_ef == potencia_pico_dc.
-    # -------------------------------------------------------------------------
     if panel['bifacial']:
         gb_efectivo    = float(np.clip(gb, 0.0, 1.0))   # Seguridad: acota entre 0 y 100 %
         potencia_ef_dc = potencia_pico_dc * (1.0 + gb_efectivo)
@@ -192,14 +156,12 @@ def calcular_viabilidad(
         df_motor['Demanda_kW'] - df_motor['Generacion_Solar_kW']
     ).clip(lower=0)
 
-    # -------------------------------------------------------------------------
+
     # 7. ENERGÍA ANUAL GENERADA  (kWh = kW × 0.25 h por intervalo de 15 min)
-    # -------------------------------------------------------------------------
     energia_anual = float((df_motor['Generacion_Solar_kW'] * 0.25).sum())
 
-    # -------------------------------------------------------------------------
+
     # 8. PREPARAR DATAFRAME FINAL
-    # -------------------------------------------------------------------------
     df_motor.index.name = 'Fecha_Hora'
     df_motor.reset_index(inplace=True)
 
