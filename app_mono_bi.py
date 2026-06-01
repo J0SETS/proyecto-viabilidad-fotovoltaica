@@ -1,5 +1,5 @@
 # =============================================================================
-#  app.py — Análisis de Viabilidad Energética Fotovoltaica
+#  app_mono_bi.py — Análisis de Viabilidad Energética Fotovoltaica
 #
 #  Archivo único: contiene el motor de simulación (pvlib) y la interfaz
 #  Streamlit en un solo módulo. Sin dependencias externas adicionales.
@@ -23,9 +23,6 @@ from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SECCIÓN 2 — CATÁLOGO DE PANELES
-#
-#  Centraliza todos los parámetros de cada módulo. Agregar un nuevo panel
-#  solo requiere añadir una entrada aquí; el motor y la UI lo leen dinámicamente.
 # ─────────────────────────────────────────────────────────────────────────────
 PANELES = {
     "Monofacial": {
@@ -34,11 +31,9 @@ PANELES = {
         "modelo_corto":     "JKM605N-72HL4",
         "modelo_completo":  "Tiger Neo 72HC (JKM605N-72HL4)",
         "potencia_w":       605,
-        "potencia_pico_dc": 399_300.0,   # Wp — potencia total del array
-        "gamma_pdc":        -0.0029,     # Coeficiente de temperatura (1/°C) = −0.29%/°C
+        "potencia_pico_dc": 399_300.0,
+        "gamma_pdc":        -0.0029,
         "bifacial":         False,
-        # Datos técnicos de referencia (no usados en pvwatts_dc)
-        # η = 23.42 %  |  A_unitario = 2.583 m²  |  P_STC_unitario = 605 W
     },
     "Bifacial": {
         "label":            "Bifacial",
@@ -50,8 +45,6 @@ PANELES = {
         "gamma_pdc":        -0.0029,
         "bifacial":         True,
         "gb_default":       0.15,
-        # Datos técnicos de referencia (no usados en pvwatts_dc)
-        # η = 22.36 %  |  A_unitario = 2.795 m²  |  P_STC_unitario = 625 W
     },
 }
 
@@ -130,8 +123,7 @@ def calcular_viabilidad(
 
     # ── 3.4  DataFrame base ────────────────────────────────────────────────────
     df_motor = pd.DataFrame(index=tiempos_naive)
-    df_motor["Gtot_POA_Wm2"] = irradiance_poa["poa_global"].values
-
+    df_motor["Gtot_POA_Wm2"] = irradiance_poa["poa_global"].clip(lower=0).fillna(0).values
     # ── 3.5  Alineación de la curva de demanda ────────────────────────────────
     try:
         if isinstance(df_demanda, str):
@@ -157,15 +149,6 @@ def calcular_viabilidad(
         df_motor["Demanda_kW"] = rng.uniform(150, 300, len(tiempos_naive))
 
     # ── 3.6  Modelado energético ───────────────────────────────────────────────
-    #
-    #  Para el panel BIFACIAL se escala la potencia pico DC efectiva antes de
-    #  pasarla a pvwatts_dc, aplicando:
-    #
-    #      P_ef = P_STC × (1 + G_b)
-    #
-    #  donde G_b es la ganancia trasera configurada por el usuario (fracción decimal).
-    #  Para el MONOFACIAL, G_b = 0  →  P_ef == P_STC (sin cambio).
-    # ──────────────────────────────────────────────────────────────────────────
     potencia_base = panel["potencia_pico_dc"]
     gamma_pdc     = panel["gamma_pdc"]
 
@@ -257,6 +240,53 @@ def _filtrar_rango(df: pd.DataFrame, desde, hasta) -> pd.DataFrame:
     ts_desde = pd.Timestamp(desde)
     ts_hasta = pd.Timestamp(hasta) + timedelta(days=1) - timedelta(seconds=1)
     return df.loc[(df["Fecha_Hora"] >= ts_desde) & (df["Fecha_Hora"] <= ts_hasta)]
+
+
+def _matriz_irradiancia(df: pd.DataFrame):
+    """
+    Construye la matriz 96 × 12 de irradiancia media POA en el plano del array.
+
+    Filas   : 96 intervalos quinceminutales del día (slot 0 = 00:00 … slot 95 = 23:45).
+    Columnas: 12 meses del año (1 = Ene … 12 = Dic).
+    Valor   : media de Gtot_POA_Wm2 para ese slot y ese mes sobre todos los días del año.
+
+    Parámetros
+    ----------
+    df : pd.DataFrame — DataFrame anual completo con columnas
+                        'Fecha_Hora' (datetime) y 'Gtot_POA_Wm2' (float).
+
+    Retorna
+    -------
+    z        : np.ndarray shape (96, 12) — valores de irradiancia media (W/m²).
+    y_labels : list[str]  de longitud 96 — etiquetas de tiempo "HH:MM".
+    x_labels : list[str]  de longitud 12 — abreviaciones de mes en español.
+    """
+    df = df.copy()
+    df["_mes"]  = df["Fecha_Hora"].dt.month                          # 1–12
+    df["_slot"] = df["Fecha_Hora"].dt.hour * 4 + df["Fecha_Hora"].dt.minute // 15  # 0–95
+
+    pivot = df.pivot_table(
+        index="_slot", columns="_mes",
+        values="Gtot_POA_Wm2", aggfunc="mean",
+    )
+    # Garantizar 96 filas × 12 columnas; rellenar huecos eventuales con 0
+    pivot = (
+        pivot
+        .reindex(index=range(96), columns=range(1, 13))
+        .fillna(0.0)
+    )
+
+    # Etiquetas de eje Y: una por slot (HH:MM), ticks visibles cada 2 h
+    y_labels = [
+        f"{h:02d}:{m:02d}"
+        for h in range(24)
+        for m in range(0, 60, 15)
+    ]
+    # Etiquetas de eje X: meses en español
+    x_labels = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+    return pivot.values, y_labels, x_labels
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -439,14 +469,13 @@ with st.sidebar:
     )
     altura = st.number_input(
         "Altitud sobre nivel del mar (m)", min_value=0.0,
-        value=538.0, step=1.0, format="%.0f",
+        value=1450.0, step=1.0, format="%.0f",
         help="Altitud del sitio de instalación en metros sobre el nivel del mar.",
     )
 
     st.markdown("---")
 
     # ── Selector de panel ─────────────────────────────────────────────────────
-    # key único y explícito → resuelve StreamlitDuplicateElementId
     st.markdown("### Panel Solar")
 
     tipo_panel = st.selectbox(
@@ -458,7 +487,7 @@ with st.sidebar:
 
     p = PANELES[tipo_panel]
 
-    # ── Ficha ejecutiva (sin datos eléctricos) ────────────────────────────────
+    # ── Ficha ejecutiva ───────────────────────────────────────────────────────
     st.markdown(
         f"<div class='panel-card'>"
         f"  <div class='pc-tipo'>{p['label']}</div>"
@@ -689,6 +718,92 @@ if st.session_state["sim_ok"] and st.session_state["df_motor"] is not None:
     )
     st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar": False})
 
+    # ── Matriz de Irradiancia POA  96 × 12 ───────────────────────────────────
+    # Usa el DataFrame anual completo (df_motor), NO el rango filtrado (df_vis),
+    # para que siempre se muestre la matriz del año completo independientemente
+    # del selector de fechas.
+    st.markdown(
+        "### Matriz de Irradiancia POA  ·  "
+        "Promedio Quinceminutal por Mes  (W/m²)"
+    )
+
+    _z, _y_lbl, _x_lbl = _matriz_irradiancia(df_motor)
+
+    # customdata 2D (96 × 12): cada celda lleva la etiqueta de hora de su fila
+    _custom = np.array([[_y_lbl[r] for _ in range(12)] for r in range(96)])
+
+    # 1. Definimos una escala tipo Inferno manual. 
+    # El valor 0.00 está forzado al color exacto de tu fondo (#12171f) para que se vea negro/transparente.
+    escala_inferno_negro = [
+        [0.00, "#12171f"],  # <--- Negro / Fondo del layout
+        [0.11, "#1b0c41"],
+        [0.22, "#4a0c6b"],
+        [0.33, "#781c6d"],
+        [0.44, "#a52c60"],
+        [0.55, "#cf4446"],
+        [0.66, "#ed6925"],
+        [0.77, "#fb9b06"],
+        [0.88, "#f7d13d"],
+        [1.00, "#fcffa4"]
+    ]
+
+    fig_hm = go.Figure(go.Heatmap(
+        z=_z,
+        x=_x_lbl,
+        y=list(range(96)),            # índices numéricos 0–95
+        colorscale=escala_inferno_negro, # <--- Usamos la escala manual aquí
+        zmin = 0, 
+        zmax = np.max(_z),
+        customdata=_custom,
+        hovertemplate=(
+            "Mes: <b>%{x}</b><br>"
+            "Hora: <b>%{customdata}</b><br>"
+            "Irradiancia: <b>%{z:.1f} W/m²</b>"
+            "<extra></extra>"
+        ),
+        colorbar=dict(
+            title=dict(
+                text="Irradiancia (W/m²)",
+                side="right",
+                font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+            ),
+            tickfont=dict(family="IBM Plex Mono", color="#8892a4", size=10),
+            thickness=14,
+            outlinecolor="#2a3040",
+            outlinewidth=1,
+        ),
+    ))
+    # Marcas de hora cada 2 h (cada 8 slots de 15 min): 00:00, 02:00 … 22:00
+    _tick_slots = list(range(0, 96, 8))
+
+    fig_hm.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#12171f",
+        font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+        xaxis=dict(
+            side="bottom",
+            title=dict(text="Mes", font=dict(color="#c8bfae", size=11)),
+            tickfont=dict(color="#8892a4"),
+            linecolor="#2a3040",
+        ),
+        yaxis=dict(
+            autorange="reversed",               # 00:00 en la parte superior
+            tickvals=_tick_slots,
+            ticktext=[_y_lbl[i] for i in _tick_slots],
+            title=dict(text="Hora del día", font=dict(color="#c8bfae", size=11)),
+            tickfont=dict(color="#8892a4"),
+            linecolor="#2a3040",
+            gridcolor="#1e2535",
+        ),
+        margin=dict(l=60, r=20, t=20, b=50),
+        height=520,
+        hoverlabel=dict(
+            bgcolor="#1e2535",
+            bordercolor="#3a4a5c",
+            font=dict(family="IBM Plex Mono", color="#e8e0d0", size=11),
+        ),
+    )
+    st.plotly_chart(fig_hm, use_container_width=True, theme=None, config={"displayModeBar": False})
     # ── Tabla y descarga ───────────────────────────────────────────────────────
     st.markdown("---")
     with st.expander("Ver datos tabulares del período seleccionado"):
