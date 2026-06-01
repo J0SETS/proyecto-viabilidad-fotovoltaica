@@ -665,17 +665,86 @@ if st.session_state["sim_ok"] and st.session_state["df_motor"] is not None:
 
     st.markdown("---")
 
-    # ── Gráfica 1: Irradiancia POA ────────────────────────────────────────────
-    st.markdown("### Irradiancia Global en el Plano del Array  ·  Gtot POA (W/m²)")
+    # ── Gráfica 1: Gtot POA vs Demanda Eléctrica Industrial (doble eje Y) ────
+    # Construida con make_subplots secondary_y=True para que ambas series sean
+    # legibles a pesar de sus unidades distintas (kW y W/m²).
+    st.markdown("### Gtot POA vs Demanda Eléctrica Industrial")
 
-    fig1 = _make_fig()
-    fig1.add_trace(go.Scatter(
-        x=df_vis["Fecha_Hora"], y=df_vis["Gtot_POA_Wm2"],
-        name="Irradiancia POA", mode="lines",
-        line=dict(color="#f5a623", width=1.5),
-        hovertemplate="%{x|%d %b %H:%M}<br><b>%{y:.1f} W/m²</b><extra></extra>",
-    ))
-    fig1.update_layout(yaxis_title="W/m²", xaxis_title="")
+    from plotly.subplots import make_subplots
+
+    _PLOT_BG   = "#12171f"
+    _GRID_COL  = "#1e2535"
+    _AXIS_COL  = "#2a3040"
+    _FONT_COL  = "#8892a4"
+    _LABEL_COL = "#c8bfae"
+
+    fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Eje Y izquierdo — Demanda (kW)
+    fig1.add_trace(
+        go.Scatter(
+            x=df_vis["Fecha_Hora"],
+            y=df_vis["Demanda_kW"],
+            name="Demanda Industrial (kW)",
+            mode="lines",
+            line=dict(color="#ff6b6b", width=1.8),
+            hovertemplate="%{x|%d %b %H:%M}<br>Demanda: <b>%{y:.1f} kW</b><extra></extra>",
+        ),
+        secondary_y=False,
+    )
+
+    # Eje Y derecho — Irradiancia POA (W/m²)
+    fig1.add_trace(
+        go.Scatter(
+            x=df_vis["Fecha_Hora"],
+            y=df_vis["Gtot_POA_Wm2"],
+            name="Gtot POA (W/m²)",
+            mode="lines",
+            line=dict(color="#f5a623", width=1.5),
+            hovertemplate="%{x|%d %b %H:%M}<br>Gtot POA: <b>%{y:.1f} W/m²</b><extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    fig1.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor=_PLOT_BG,
+        font=dict(family="IBM Plex Mono", color=_FONT_COL, size=11),
+        hovermode="x unified",
+        height=340,
+        margin=dict(l=60, r=60, t=40, b=50),
+        hoverlabel=dict(
+            bgcolor="#1e2535", bordercolor="#3a4a5c",
+            font=dict(family="IBM Plex Mono", color="#e8e0d0", size=11),
+        ),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(color="#c8bfae", size=11), bgcolor="rgba(0,0,0,0)",
+        ),
+        xaxis=dict(
+            gridcolor=_GRID_COL, linecolor=_AXIS_COL,
+            tickfont=dict(color=_FONT_COL),
+        ),
+    )
+    # Eje Y izquierdo — kW (rojo)
+    fig1.update_yaxes(
+        title_text="Demanda (kW)",
+        title_font=dict(color="#ff6b6b"),
+        tickfont=dict(color="#ff6b6b"),
+        gridcolor=_GRID_COL,
+        linecolor=_AXIS_COL,
+        secondary_y=False,
+    )
+    # Eje Y derecho — W/m² (naranja)
+    fig1.update_yaxes(
+        title_text="Irradiancia POA (W/m²)",
+        title_font=dict(color="#f5a623"),
+        tickfont=dict(color="#f5a623"),
+        gridcolor="rgba(0,0,0,0)",   # sin grilla en el eje secundario para no saturar
+        showgrid=False,
+        secondary_y=True,
+    )
+
     st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
 
     # ── Gráfica 2: Generación solar ───────────────────────────────────────────
