@@ -62,11 +62,15 @@ def calcular_viabilidad(lat: float, lon: float, altura: float, df_demanda: pd.Da
     airmass_abs = pvlib.atmosphere.get_absolute_airmass(
         airmass, pvlib.atmosphere.alt2pres(altura)
     )
+    
+    turbidity = pvlib.clearsky.lookup_linke_turbidity(
+        tiempos, lat, lon)
+
 
     clearsky = pvlib.clearsky.ineichen(
         sol['apparent_zenith'],
         airmass_absolute=airmass_abs,
-        linke_turbidity=3,
+        linke_turbidity=turbidity,
         altitude=altura,
     )  # → DataFrame con columnas ['ghi', 'dni', 'dhi'] e índice datetime (tz)
 
@@ -125,11 +129,13 @@ def calcular_viabilidad(lat: float, lon: float, altura: float, df_demanda: pd.Da
     potencia_pico_dc = 399_300.0   # Wp (potencia pico DC del sistema)
     gamma_pdc        = -0.0029     # Coeficiente de temperatura de potencia (1/°C)
 
-    temp_params = TEMPERATURE_MODEL_PARAMETERS['sapm']['open_rack_glass_glass']
+
+    # Hacer esto en un instant quinceminutal con la base de datos de temperatura ambiente y velocidad del viento para Jalapa.
+    temp_params = TEMPERATURE_MODEL_PARAMETERS['sapm']['close_mount_glass_glass']
     temp_celda = pvlib.temperature.sapm_cell(
         poa_global=df_motor['Gtot_POA_Wm2'],
-        temp_air=20.0,
-        wind_speed=1.5,
+        temp_air=20.0,  # Cambiar usando base de datos de temperatura ambiente para jalapa. 
+        wind_speed=1.5, # Base de datos. 
         **temp_params,
     )
 
@@ -150,14 +156,6 @@ def calcular_viabilidad(lat: float, lon: float, altura: float, df_demanda: pd.Da
     # -------------------------------------------------------------------------
     energia_anual = float((df_motor['Generacion_Solar_kW'] * 0.25).sum())
 
-    # -------------------------------------------------------------------------
-    # 8. PREPARAR DATAFRAME FINAL
-    #
-    #    BUG ORIGINAL corregido:
-    #    reset_index(names='Fecha_Hora') solo existe en pandas ≥ 1.5.
-    #    Asignar index.name antes de reset_index() es compatible con todas
-    #    las versiones relevantes de pandas.
-    # -------------------------------------------------------------------------
     df_motor.index.name = 'Fecha_Hora'
     df_motor.reset_index(inplace=True)
 

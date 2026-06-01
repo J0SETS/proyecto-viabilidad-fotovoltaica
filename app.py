@@ -1,13 +1,20 @@
 # =============================================================================
 #  app.py — Interfaz de Viabilidad Fotovoltaica
-#  Requiere: streamlit, pandas, plotly, motor_calculo.py en el mismo directorio
+#  Requiere: streamlit, pandas, plotly, motor_calculo.py, pronostico.py
 # =============================================================================
 
 import streamlit as st
 import pandas as pd
+import numpy as np                          # necesario para np.isnan en tarjetas
 import plotly.graph_objects as go
 from datetime import timedelta
 from motor_calculo import calcular_viabilidad
+from pronostico   import (                  # módulo de pronóstico meteorológico
+    obtener_pronostico,
+    calcular_generacion_pronostico,
+    resumen_diario,
+    NIVEL_CONFIG,
+)
 
 # -----------------------------------------------------------------------------
 # CONFIGURACIÓN GLOBAL DE PÁGINA
@@ -135,14 +142,49 @@ def filtrar_rango(df: pd.DataFrame, desde, hasta) -> pd.DataFrame:
     ts_hasta = pd.Timestamp(hasta) + timedelta(days=1) - timedelta(seconds=1)
     return df.loc[(df["Fecha_Hora"] >= ts_desde) & (df["Fecha_Hora"] <= ts_hasta)]
 
+
+def tarjeta_dia_html(info: dict) -> str:
+    """HTML de una tarjeta compacta de resumen diario del pronóstico."""
+    fecha_str = info["fecha"].strftime("%a %d %b").upper()
+    temp_str  = f"{info['temp_max_c']:.0f}°C" if not np.isnan(info["temp_max_c"]) else "—"
+    return f"""
+    <div style="background:{info['color']}18;border:1px solid {info['color']}55;
+                border-radius:10px;padding:14px 8px;text-align:center;
+                display:flex;flex-direction:column;gap:5px;min-height:175px;
+                justify-content:center;">
+        <div style="font-size:1.7rem;line-height:1;">{info['emoji']}</div>
+        <div style="font-family:'IBM Plex Mono',monospace;color:#8892a4;
+                    font-size:0.64rem;letter-spacing:0.08em;">{fecha_str}</div>
+        <div style="color:{info['color']};font-weight:700;font-size:0.72rem;
+                    letter-spacing:0.05em;">{info['label'].upper()}</div>
+        <div style="color:#e8e0d0;font-family:'IBM Plex Mono',monospace;
+                    font-size:1.1rem;font-weight:600;">{info['generacion_kwh']:,.0f} kWh</div>
+        <div style="color:#8892a4;font-size:0.62rem;line-height:1.4;">{info['descripcion']}</div>
+        <div style="color:#8892a4;font-size:0.60rem;">
+            ☁ {info['nubosidad_pct']:.0f}%&nbsp;·&nbsp;
+            🌡 {temp_str}&nbsp;·&nbsp;
+            💧 {info['precipitacion_mm']:.1f} mm
+        </div>
+    </div>"""
+
 # =============================================================================
 # SESSION STATE
-# Se persiste el resultado de la simulación para que el filtro de fechas
-# no vuelva a llamar al motor de cálculo con cada interacción.
+# Persiste la simulación y el pronóstico de forma independiente para que
+# ninguna interacción (filtros, botones) borre los datos calculados.
 # =============================================================================
-for key, default in [("df_motor", None), ("energia_anual", None), ("sim_ok", False)]:
+_DEFAULTS = {
+    # Simulación anual
+    "df_motor":      None,
+    "energia_anual": None,
+    "sim_ok":        False,
+    # Pronóstico 5 días
+    "df_pron":       None,
+    "resumen_pron":  None,
+    "pron_ok":       False,
+}
+for key, val in _DEFAULTS.items():
     if key not in st.session_state:
-        st.session_state[key] = default
+        st.session_state[key] = val
 
 # =============================================================================
 # TÍTULO PRINCIPAL
@@ -199,6 +241,18 @@ with st.sidebar:
     st.markdown("---")
     boton_ejecutar = st.button("▶ Ejecutar Simulación", use_container_width=True)
 
+    # ── Sección de pronóstico en la barra lateral ─────────────────────────────
+    st.markdown("---")
+    st.markdown("### Pronóstico 5 Días")
+    st.markdown(
+        "<p style='color:#8892a4;font-size:0.72rem;line-height:1.4;'>"
+        "Descarga datos meteorológicos en tiempo real de Open-Meteo y calcula "
+        "la generación solar esperada para los próximos 5 días usando las "
+        "coordenadas ingresadas arriba.</p>",
+        unsafe_allow_html=True,
+    )
+    boton_pron = st.button("🌤 Obtener Pronóstico", use_container_width=True)
+
 # =============================================================================
 # EJECUCIÓN DE LA SIMULACIÓN
 # =============================================================================
@@ -218,9 +272,9 @@ if boton_ejecutar:
                 df_motor["Fecha_Hora"] = pd.to_datetime(df_motor["Fecha_Hora"])
 
                 # Persistir en session_state
-                st.session_state["df_motor"]    = df_motor
+                st.session_state["df_motor"]      = df_motor
                 st.session_state["energia_anual"] = energia_anual
-                st.session_state["sim_ok"]       = True
+                st.session_state["sim_ok"]        = True
 
             except Exception as e:
                 st.session_state["sim_ok"] = False
@@ -231,8 +285,29 @@ if boton_ejecutar:
                     st.code(traceback.format_exc(), language="python")
 
 # =============================================================================
-# SECCIÓN DE RESULTADOS
-# Se renderiza si hay datos válidos en session_state.
+# EJECUCIÓN DEL PRONÓSTICO
+# =============================================================================
+if boton_pron:
+    with st.spinner("Descargando datos de Open-Meteo y calculando generación pronosticada…"):
+        try:
+            datos_json = obtener_pronostico(latitud, longitud, dias=5)
+            df_pron    = calcular_generacion_pronostico(
+                datos_json, latitud, longitud, altura,
+            )
+            df_pron["Fecha_Hora"] = pd.to_datetime(df_pron["Fecha_Hora"])
+            resumen = resumen_diario(df_pron)
+            st.session_state["df_pron"]      = df_pron
+            st.session_state["resumen_pron"] = resumen
+            st.session_state["pron_ok"]      = True
+        except Exception as e:
+            st.session_state["pron_ok"] = False
+            st.error(f"Error al obtener el pronóstico: {e}")
+            import traceback
+            with st.expander("Ver detalles del error"):
+                st.code(traceback.format_exc(), language="python")
+
+# =============================================================================
+# SECCIÓN 1 — RESULTADOS DE LA SIMULACIÓN ANUAL
 # =============================================================================
 if st.session_state["sim_ok"] and st.session_state["df_motor"] is not None:
 
@@ -380,4 +455,119 @@ else:
     st.info(
         "Configura la ubicación y sube tu curva de demanda en la barra lateral. "
         "Luego presiona **▶ Ejecutar Simulación** para ver los resultados."
+    )
+
+# =============================================================================
+# SECCIÓN 2 — PRONÓSTICO A 5 DÍAS
+# Aparece debajo de los resultados de la simulación, independientemente de si
+# la simulación fue ejecutada. Se activa desde la barra lateral.
+# =============================================================================
+st.markdown("---")
+st.markdown("## 🌤️ Pronóstico de Generación Solar — Próximos 5 Días")
+st.markdown(
+    "<p style='color:#8892a4;font-size:0.80rem;margin-top:-10px;font-family:IBM Plex Mono;'>"
+    "Fuente: Open-Meteo · Resolución origen: 1 h · Interpolado a 15 min · "
+    "Descomposición GHI→DNI/DHI: modelo Erbs (pvlib)</p>",
+    unsafe_allow_html=True,
+)
+
+# Aviso de fiabilidad del pronóstico meteorológico
+st.markdown("""
+<div style="background:#f5a62310;border:1px solid #f5a62335;border-radius:8px;
+            padding:10px 14px;font-size:0.76rem;color:#c8bfae;
+            font-family:'IBM Plex Mono',monospace;margin-bottom:0.5rem;">
+    ⚠️&nbsp; <strong>Precisión del pronóstico:</strong>
+    Primeras 48 h — alta fiabilidad. &nbsp;De 48 h a 72 h — incertidumbre creciente.
+    &nbsp;Más allá de 72 h — usar solo como tendencia referencial.
+    La curva a 15 min es una interpolación visual que no modela
+    la sub-variabilidad de nubosidad.
+</div>
+""", unsafe_allow_html=True)
+
+# ── Mostrar resultados si hay datos en session_state ─────────────────────────
+if st.session_state["pron_ok"] and st.session_state["df_pron"] is not None:
+
+    df_pron: pd.DataFrame = st.session_state["df_pron"]
+    resumen: list[dict]   = st.session_state["resumen_pron"]
+
+    # ── Tarjetas de resumen diario ────────────────────────────────────────────
+    st.markdown("### Resumen por Día")
+    cols_dias = st.columns(len(resumen))
+    for col, info in zip(cols_dias, resumen):
+        with col:
+            st.markdown(tarjeta_dia_html(info), unsafe_allow_html=True)
+
+    # ── Alertas operativas (solo niveles alto y crítico) ──────────────────────
+    alertas = [r for r in resumen if r["nivel"] in ("alto", "critico", "muy alto")]
+    if alertas:
+        st.markdown("### ⚠️ Alertas Operativas")
+        for a in alertas:
+            fecha_str = a["fecha"].strftime("%A %d de %B").capitalize()
+            st.markdown(f"""
+            <div style="background:{a['color']}12;border-left:3px solid {a['color']};
+                        border-radius:0 6px 6px 0;padding:10px 14px;margin:4px 0;">
+                <span style="font-family:'IBM Plex Mono',monospace;color:{a['color']};
+                             font-size:0.78rem;font-weight:600;">
+                    {a['emoji']}&nbsp; {fecha_str} — {a['label'].upper()}
+                </span><br>
+                <span style="color:#c8bfae;font-size:0.76rem;">
+                    {a['descripcion']} &nbsp;·&nbsp;
+                    Precipitación: {a['precipitacion_mm']:.1f} mm &nbsp;·&nbsp;
+                    Generación esperada: {a['generacion_kwh']:,.0f} kWh
+                </span>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Gráfica P1: Irradiancia POA pronosticada  ·  Línea naranja ───────────
+    st.markdown("### Irradiancia Pronosticada en el Plano del Array  ·  Gtot POA (W/m²)")
+    fp1 = make_fig()
+    fp1.add_trace(go.Scatter(
+        x=df_pron["Fecha_Hora"], y=df_pron["Gtot_POA_Wm2"],
+        name="Irradiancia POA", mode="lines",
+        line=dict(color="#f5a623", width=1.5),
+        hovertemplate="%{x|%d %b %H:%M}<br><b>%{y:.1f} W/m²</b><extra></extra>",
+    ))
+    fp1.update_layout(yaxis_title="W/m²", xaxis_title="")
+    st.plotly_chart(fp1, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Gráfica P2: Generación solar pronosticada  ·  Amarillo con relleno ───
+    st.markdown("### Generación Solar Pronosticada  ·  (kW)")
+    fp2 = make_fig()
+    fp2.add_trace(go.Scatter(
+        x=df_pron["Fecha_Hora"], y=df_pron["Generacion_Solar_kW"],
+        name="Generación Solar", mode="lines", fill="tozeroy",
+        line=dict(color="#ffe033", width=1.5),
+        fillcolor="rgba(255,224,51,0.12)",
+        hovertemplate="%{x|%d %b %H:%M}<br><b>%{y:.2f} kW</b><extra></extra>",
+    ))
+    fp2.update_layout(yaxis_title="kW", xaxis_title="Fecha / Hora")
+    st.plotly_chart(fp2, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Tabla y descarga ──────────────────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("Ver tabla de resumen diario del pronóstico"):
+        df_tabla = pd.DataFrame([{
+            "Fecha":            str(r["fecha"]),
+            "Estado":           f"{r['emoji']} {r['descripcion']}",
+            "Alerta":           r["label"],
+            "Generación kWh":   f"{r['generacion_kwh']:,.0f}",
+            "Nubosidad %":      f"{r['nubosidad_pct']:.0f}",
+            "Temp. Máx. °C":    f"{r['temp_max_c']:.1f}" if not np.isnan(r["temp_max_c"]) else "—",
+            "Precipitación mm": f"{r['precipitacion_mm']:.1f}",
+        } for r in resumen])
+        st.dataframe(df_tabla, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        label="⬇ Descargar pronóstico a 15 min (CSV)",
+        data=df_pron.to_csv(index=False).encode("utf-8"),
+        file_name="pronostico_generacion_5dias.csv",
+        mime="text/csv",
+    )
+
+else:
+    # Estado inicial de la sección de pronóstico
+    st.info(
+        "Presiona **🌤 Obtener Pronóstico** en la barra lateral para descargar "
+        "datos actualizados y calcular la generación esperada en los próximos 5 días."
     )
