@@ -885,9 +885,7 @@ if st.session_state["sim_ok"] and st.session_state["df_motor"] is not None:
         mime="text/csv",
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
 #  ESTADO INICIAL — antes de la primera simulación
-# ─────────────────────────────────────────────────────────────────────────────
 else:
     st.info(
         "Configura la ubicación y sube tu curva de demanda en la barra lateral. "
