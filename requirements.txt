@@ -5,6 +5,5 @@ plotly
 matplotlib
 numpy
 seaborn
-calendar
 requests
 openpyxl
