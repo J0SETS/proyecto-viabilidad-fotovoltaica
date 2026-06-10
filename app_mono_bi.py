@@ -1,893 +1,261 @@
 # =============================================================================
-#  app_mono_bi.py — Análisis de Viabilidad Energética Fotovoltaica
-#
-#  Archivo único: contiene el motor de simulación (pvlib) y la interfaz
-#  Streamlit en un solo módulo. Sin dependencias externas adicionales.
-#
-#  Dependencias: streamlit, pvlib >= 0.9, pandas >= 1.5, numpy, plotly
+#  app_mono_bi.py — Interfaz de Usuario Fotovoltaica
 # =============================================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 1 — IMPORTS
-# ─────────────────────────────────────────────────────────────────────────────
 import traceback
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import pvlib
+from plotly.subplots import make_subplots
 import streamlit as st
-from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 
+# Importamos la lógica matemática y catálogos desde el motor
+from motor_calculo_mono_bi import (
+    PANELES, 
+    calcular_viabilidad, 
+    calcular_tilt_optimo
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 2 — CATÁLOGO DE PANELES
+#  CATÁLOGOS Y CONSTANTES DE UI
 # ─────────────────────────────────────────────────────────────────────────────
-PANELES = {
-    "Monofacial": {
-        "label":            "Monofacial",
-        "fabricante":       "Jinko Solar",
-        "modelo_corto":     "JKM605N-72HL4",
-        "modelo_completo":  "Tiger Neo 72HC (JKM605N-72HL4)",
-        "potencia_w":       605,
-        "potencia_pico_dc": 399_300.0,
-        "gamma_pdc":        -0.0029,
-        "bifacial":         False,
-    },
-    "Bifacial": {
-        "label":            "Bifacial",
-        "fabricante":       "Jinko Solar",
-        "modelo_corto":     "JKM625N-78HL4-BDV",
-        "modelo_completo":  "Tiger Neo N-type (JKM625N-78HL4-BDV)",
-        "potencia_w":       625,
-        "potencia_pico_dc": 399_300.0,
-        "gamma_pdc":        -0.0029,
-        "bifacial":         True,
-        "gb_default":       0.15,
-    },
+ESTADOS_MEXICO = {
+    "Personalizado": (25.6866, -100.3161, 540.0),
+    "Nuevo León (Monterrey)": (25.6866, -100.3161, 540.0),
+    "Jalisco (Guadalajara)": (20.6597, -103.3496, 1566.0),
+    "Chihuahua (Chihuahua)": (28.6329, -106.0691, 1415.0),
+    "Ciudad de México": (19.4326, -99.1332, 2240.0),
+    "Querétaro (Querétaro)": (20.5888, -100.3899, 1820.0),
+    "Yucatán (Mérida)": (20.9674, -89.6237, 10.0),
+    "Baja California (Tijuana)": (32.5149, -117.0382, 20.0),
+    "Sonora (Hermosillo)": (29.0729, -110.9559, 210.0),
 }
 
+MESES_STR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 3 — MOTOR DE SIMULACIÓN FOTOVOLTAICA
+#  HELPERS DE VISUALIZACIÓN
 # ─────────────────────────────────────────────────────────────────────────────
-def calcular_viabilidad(
-    lat: float,
-    lon: float,
-    altura: float,
-    df_demanda: pd.DataFrame,
-    tipo_panel: str = "Monofacial",
-    gb: float = 0.0,
-):
-    """
-    Simula un año completo de generación solar y su impacto en la curva de demanda.
-
-    Parámetros
-    ----------
-    lat, lon    : float          Coordenadas geográficas del sitio.
-    altura      : float          Altitud sobre el nivel del mar en metros.
-    df_demanda  : pd.DataFrame   DataFrame con una columna numérica de demanda (kW).
-    tipo_panel  : str            Clave del diccionario PANELES: 'Monofacial' | 'Bifacial'.
-    gb          : float          Ganancia trasera bifacial como fracción decimal (ej. 0.15).
-                                 Solo se aplica cuando tipo_panel == 'Bifacial'.
-
-    Retorna
-    -------
-    df_motor      : pd.DataFrame con columnas:
-                    ['Fecha_Hora', 'Demanda_kW', 'Gtot_POA_Wm2',
-                     'Generacion_Solar_kW', 'Demanda_Post_Inyeccion_Solar_kW']
-    energia_anual : float  kWh solares generados en el año simulado.
-    """
-
-    if tipo_panel not in PANELES:
-        raise ValueError(
-            f"tipo_panel='{tipo_panel}' no reconocido. "
-            f"Opciones válidas: {list(PANELES.keys())}"
-        )
-    panel = PANELES[tipo_panel]
-
-    # ── 3.1  Índice temporal: año completo a intervalos de 15 min ─────────────
-    tz = "America/Mexico_City"
-    tiempos = pd.date_range(
-        start="2026-12-21 00:00",
-        end="2027-12-20 23:45",
-        freq="15min",
-        tz=tz,
-    )
-    tiempos_naive = tiempos.tz_localize(None)
-
-    # ── 3.2  Posición solar ────────────────────────────────────────────────────
-    sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon)
-
-    # ── 3.3  Irradiancia en cielo despejado (modelo Ineichen) ─────────────────
-    airmass     = pvlib.atmosphere.get_relative_airmass(sol["apparent_zenith"])
-    airmass_abs = pvlib.atmosphere.get_absolute_airmass(
-        airmass, pvlib.atmosphere.alt2pres(altura)
-    )
-    clearsky = pvlib.clearsky.ineichen(
-        sol["apparent_zenith"],
-        airmass_absolute=airmass_abs,
-        linke_turbidity=3,
-        altitude=altura,
-    )
-    irradiance_poa = pvlib.irradiance.get_total_irradiance(
-        surface_tilt=25,
-        surface_azimuth=180,
-        solar_zenith=sol["apparent_zenith"],
-        solar_azimuth=sol["azimuth"],
-        dni=clearsky["dni"],
-        ghi=clearsky["ghi"],
-        dhi=clearsky["dhi"],
-    )
-
-    # ── 3.4  DataFrame base ────────────────────────────────────────────────────
-    df_motor = pd.DataFrame(index=tiempos_naive)
-    df_motor["Gtot_POA_Wm2"] = irradiance_poa["poa_global"].clip(lower=0).fillna(0).values
-    # ── 3.5  Alineación de la curva de demanda ────────────────────────────────
-    try:
-        if isinstance(df_demanda, str):
-            df_demanda = pd.read_csv(df_demanda, index_col=0, parse_dates=True)
-
-        col = "Demanda_kW" if "Demanda_kW" in df_demanda.columns else df_demanda.columns[0]
-        serie = pd.to_numeric(df_demanda[col], errors="coerce").fillna(0).values
-
-        if len(serie) == len(tiempos_naive):
-            df_motor["Demanda_kW"] = serie
-        else:
-            s_resampled = (
-                pd.Series(serie)
-                .reindex(pd.RangeIndex(len(tiempos_naive)))
-                .interpolate(method="linear")
-                .bfill()
-                .ffill()
-            )
-            df_motor["Demanda_kW"] = s_resampled.values
-
-    except Exception:
-        rng = np.random.default_rng(seed=42)
-        df_motor["Demanda_kW"] = rng.uniform(150, 300, len(tiempos_naive))
-
-    # ── 3.6  Modelado energético ───────────────────────────────────────────────
-    potencia_base = panel["potencia_pico_dc"]
-    gamma_pdc     = panel["gamma_pdc"]
-
-    if panel["bifacial"]:
-        gb_ef       = float(np.clip(gb, 0.0, 1.0))
-        potencia_ef = potencia_base * (1.0 + gb_ef)
-    else:
-        potencia_ef = potencia_base
-
-    temp_params = TEMPERATURE_MODEL_PARAMETERS["sapm"]["open_rack_glass_glass"]
-    temp_celda  = pvlib.temperature.sapm_cell(
-        poa_global=df_motor["Gtot_POA_Wm2"],
-        temp_air=20.0,
-        wind_speed=1.5,
-        **temp_params,
-    )
-    pdc = pvlib.pvsystem.pvwatts_dc(
-        effective_irradiance=df_motor["Gtot_POA_Wm2"],
-        temp_cell=temp_celda,
-        pdc0=potencia_ef,
-        gamma_pdc=gamma_pdc,
-    )
-
-    df_motor["Generacion_Solar_kW"] = (pdc / 1_000.0).clip(lower=0)
-    df_motor["Demanda_Post_Inyeccion_Solar_kW"] = (
-        df_motor["Demanda_kW"] - df_motor["Generacion_Solar_kW"]
-    ).clip(lower=0)
-
-    # ── 3.7  Energía anual generada (kWh = kW × 0.25 h por intervalo de 15 min)
-    energia_anual = float((df_motor["Generacion_Solar_kW"] * 0.25).sum())
-
-    # ── 3.8  DataFrame final ──────────────────────────────────────────────────
-    df_motor.index.name = "Fecha_Hora"
-    df_motor.reset_index(inplace=True)
-    df_motor = df_motor[[
-        "Fecha_Hora",
-        "Demanda_kW",
-        "Gtot_POA_Wm2",
-        "Generacion_Solar_kW",
-        "Demanda_Post_Inyeccion_Solar_kW",
-    ]]
-    return df_motor, energia_anual
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 4 — HELPERS DE INTERFAZ
-# ─────────────────────────────────────────────────────────────────────────────
-def _etiqueta_superficie(pct: int) -> str:
-    """Devuelve el texto de entorno según el porcentaje de ganancia bifacial."""
-    if pct <= 10:
-        return "🌱  Suelo oscuro / Tierra o Techo asfáltico convencional"
-    elif pct <= 15:
-        return "🏢  Pasto / Techo industrial gris estándar"
-    elif pct <= 20:
-        return "🚗  Concreto claro / Estacionamientos (Carport)"
-    else:
-        return "☀️  Superficie blanca altamente reflectiva (Máximo rendimiento)"
-
-
 def _make_fig(title: str = "") -> go.Figure:
-    """Figura Plotly con el tema oscuro corporativo ya aplicado."""
-    _PLOT_BG   = "#12171f"
-    _GRID_COL  = "#1e2535"
-    _AXIS_COL  = "#2a3040"
-    _FONT_COL  = "#8892a4"
-    _LABEL_COL = "#c8bfae"
-
+    """Genera una figura Plotly base con el tema oscuro corporativo."""
     fig = go.Figure()
     fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor=_PLOT_BG,
-        font=dict(family="IBM Plex Mono", color=_FONT_COL, size=11),
-        xaxis=dict(gridcolor=_GRID_COL, linecolor=_AXIS_COL,
-                   tickfont=dict(color=_FONT_COL), title_font=dict(color=_LABEL_COL)),
-        yaxis=dict(gridcolor=_GRID_COL, linecolor=_AXIS_COL,
-                   tickfont=dict(color=_FONT_COL), title_font=dict(color=_LABEL_COL)),
-        hovermode="x unified",
-        margin=dict(l=55, r=20, t=40, b=50),
-        height=300,
-        hoverlabel=dict(bgcolor="#1e2535", bordercolor="#3a4a5c",
-                        font=dict(family="IBM Plex Mono", color="#e8e0d0", size=11)),
-        title=dict(text=title, font=dict(color=_LABEL_COL, size=12), x=0),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f",
+        font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+        xaxis=dict(gridcolor="#1e2535", linecolor="#2a3040"),
+        yaxis=dict(gridcolor="#1e2535", linecolor="#2a3040"),
+        hovermode="x unified", height=300, margin=dict(l=55, r=20, t=40, b=50),
+        title=dict(text=title, font=dict(color="#c8bfae", size=12), x=0),
     )
     return fig
 
-
 def _filtrar_rango(df: pd.DataFrame, desde, hasta) -> pd.DataFrame:
-    """Filtra el DataFrame al rango de fechas (ambos extremos inclusivos)."""
     ts_desde = pd.Timestamp(desde)
     ts_hasta = pd.Timestamp(hasta) + timedelta(days=1) - timedelta(seconds=1)
     return df.loc[(df["Fecha_Hora"] >= ts_desde) & (df["Fecha_Hora"] <= ts_hasta)]
 
-
 def _matriz_irradiancia(df: pd.DataFrame):
-    """
-    Construye la matriz 96 × 12 de irradiancia media POA en el plano del array.
-
-    Filas   : 96 intervalos quinceminutales del día (slot 0 = 00:00 … slot 95 = 23:45).
-    Columnas: 12 meses del año (1 = Ene … 12 = Dic).
-    Valor   : media de Gtot_POA_Wm2 para ese slot y ese mes sobre todos los días del año.
-
-    Parámetros
-    ----------
-    df : pd.DataFrame — DataFrame anual completo con columnas
-                        'Fecha_Hora' (datetime) y 'Gtot_POA_Wm2' (float).
-
-    Retorna
-    -------
-    z        : np.ndarray shape (96, 12) — valores de irradiancia media (W/m²).
-    y_labels : list[str]  de longitud 96 — etiquetas de tiempo "HH:MM".
-    x_labels : list[str]  de longitud 12 — abreviaciones de mes en español.
-    """
     df = df.copy()
-    df["_mes"]  = df["Fecha_Hora"].dt.month                          # 1–12
-    df["_slot"] = df["Fecha_Hora"].dt.hour * 4 + df["Fecha_Hora"].dt.minute // 15  # 0–95
+    df["_mes"] = df["Fecha_Hora"].dt.month
+    df["_slot"] = df["Fecha_Hora"].dt.hour * 4 + df["Fecha_Hora"].dt.minute // 15
+    pivot = df.pivot_table(index="_slot", columns="_mes", values="Gtot_POA_Wm2", aggfunc="mean")
+    pivot = pivot.reindex(index=range(96), columns=range(1, 13)).fillna(0.0)
+    
+    y_labels = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0, 60, 15)]
+    return pivot.values, y_labels, MESES_STR
 
-    pivot = df.pivot_table(
-        index="_slot", columns="_mes",
-        values="Gtot_POA_Wm2", aggfunc="mean",
-    )
-    # Garantizar 96 filas × 12 columnas; rellenar huecos eventuales con 0
-    pivot = (
-        pivot
-        .reindex(index=range(96), columns=range(1, 13))
-        .fillna(0.0)
-    )
-
-    # Etiquetas de eje Y: una por slot (HH:MM), ticks visibles cada 2 h
-    y_labels = [
-        f"{h:02d}:{m:02d}"
-        for h in range(24)
-        for m in range(0, 60, 15)
-    ]
-    # Etiquetas de eje X: meses en español
-    x_labels = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
-                "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-
-    return pivot.values, y_labels, x_labels
-
+# Cacheamos la función del motor para no recalcular si el usuario solo cambia parámetros en UI
+@st.cache_data(show_spinner=False)
+def get_tilt_optimo(lat, lon, altura):
+    return calcular_tilt_optimo(lat, lon, altura)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 5 — CONFIGURACIÓN STREAMLIT
+#  CONFIGURACIÓN STREAMLIT & UI
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Análisis Fotovoltaico",
-    page_icon="☀️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Análisis Fotovoltaico", page_icon="☀️", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
     html, body, [class*="css"]  { font-family: 'IBM Plex Sans', sans-serif; }
-    .stApp                      { background-color: #0f1117; color: #e8e0d0; }
-
-    /* ── Sidebar ── */
-    [data-testid="stSidebar"] {
-        background-color: #161b27;
-        border-right: 1px solid #2a3040;
-    }
-    [data-testid="stSidebar"] .stMarkdown p {
-        color: #8892a4; font-size: 0.78rem;
-        letter-spacing: 0.06em; text-transform: uppercase;
-    }
-
-    /* ── Títulos ── */
-    h1 {
-        font-family: 'IBM Plex Mono', monospace !important;
-        color: #f5a623 !important; letter-spacing: -0.02em; font-size: 1.8rem !important;
-    }
-    h3 {
-        font-family: 'IBM Plex Mono', monospace !important;
-        color: #c8bfae !important; font-size: 0.85rem !important;
-        letter-spacing: 0.12em; text-transform: uppercase;
-        border-bottom: 1px solid #2a3040; padding-bottom: 6px; margin-top: 2rem !important;
-    }
-
-    /* ── Métricas ── */
-    [data-testid="metric-container"] {
-        background-color: #161b27; border: 1px solid #2a3040;
-        border-radius: 8px; padding: 18px 20px;
-    }
-    [data-testid="metric-container"] label {
-        color: #8892a4 !important; font-size: 0.72rem !important;
-        text-transform: uppercase; letter-spacing: 0.1em;
-    }
-    [data-testid="metric-container"] [data-testid="stMetricValue"] {
-        color: #f5a623 !important; font-family: 'IBM Plex Mono', monospace;
-        font-size: 1.6rem !important;
-    }
-    [data-testid="metric-container"] [data-testid="stMetricDelta"] {
-        color: #4ecdc4 !important; font-size: 0.8rem !important;
-    }
-
-    /* ── Botón principal ── */
-    div[data-testid="stButton"] > button {
-        background: linear-gradient(135deg, #f5a623, #e8860d);
-        color: #0f1117; font-family: 'IBM Plex Mono', monospace;
-        font-weight: 600; font-size: 0.82rem; letter-spacing: 0.08em;
-        text-transform: uppercase; border: none; border-radius: 6px;
-        padding: 14px 0; width: 100%; transition: opacity 0.2s;
-    }
-    div[data-testid="stButton"] > button:hover { opacity: 0.85; }
-
-    /* ── Inputs ── */
-    [data-testid="stNumberInput"] input,
-    [data-testid="stDateInput"]   input {
-        background-color: #1e2535; border: 1px solid #2a3040;
-        color: #e8e0d0; border-radius: 5px;
-    }
-    [data-testid="stNumberInput"] label,
-    [data-testid="stDateInput"]   label { color: #8892a4 !important; font-size: 0.78rem !important; }
-
-    [data-testid="stFileUploader"] {
-        background-color: #1e2535; border: 1px dashed #3a4a5c;
-        border-radius: 8px; padding: 10px;
-    }
-    [data-testid="stFileUploader"] label { color: #8892a4 !important; font-size: 0.78rem !important; }
-
-    hr { border-color: #2a3040; }
-
-    [data-testid="stAlert"] {
-        background-color: #1e2535; border-radius: 6px;
-        border-left: 3px solid #f5a623; color: #c8bfae; font-size: 0.83rem;
-    }
-
-    /* ── Ficha de panel ── */
-    .panel-card {
-        background: #1a2235;
-        border: 1px solid #2a3a50;
-        border-left: 3px solid #f5a623;
-        border-radius: 8px;
-        padding: 14px 16px;
-        margin-top: 8px;
-        font-family: 'IBM Plex Sans', sans-serif;
-        line-height: 1.8;
-    }
-    .pc-tipo   { color: #f5a623; font-weight: 600; font-size: 0.70rem;
-                 letter-spacing: 0.12em; text-transform: uppercase; }
-    .pc-fabr   { color: #8892a4; font-size: 0.78rem; margin-top: 2px; }
-    .pc-modelo { color: #e8e0d0; font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; }
-    .pc-tag    { display: inline-block; background: #0f1117;
-                 border: 1px solid #2a3a50; border-radius: 4px;
-                 padding: 3px 10px; font-size: 0.72rem;
-                 color: #4ecdc4; font-family: 'IBM Plex Mono', monospace; }
-
-    /* ── Etiqueta de superficie bajo el slider ── */
-    .superficie-label {
-        margin-top: 6px; padding: 9px 13px;
-        background: #1a2235; border-radius: 6px;
-        border-left: 3px solid #4ecdc4;
-        font-size: 0.80rem; color: #c8bfae;
-        font-family: 'IBM Plex Sans', sans-serif;
-    }
-
-    /* ── Badge de panel simulado ── */
-    .panel-badge {
-        display: inline-block;
-        background: #1a2235;
-        border: 1px solid #2a3a50;
-        border-left: 3px solid #4ecdc4;
-        border-radius: 6px;
-        padding: 6px 14px;
-        font-size: 0.80rem;
-        color: #4ecdc4;
-        font-family: 'IBM Plex Mono', monospace;
-        margin-bottom: 1.2rem;
-    }
+    .stApp { background-color: #0f1117; color: #e8e0d0; }
+    [data-testid="stSidebar"] { background-color: #161b27; border-right: 1px solid #2a3040; }
+    h1 { font-family: 'IBM Plex Mono', monospace !important; color: #f5a623 !important; font-size: 1.8rem !important; }
+    h3 { font-family: 'IBM Plex Mono', monospace !important; color: #c8bfae !important; font-size: 0.85rem !important; text-transform: uppercase; border-bottom: 1px solid #2a3040; padding-bottom: 6px; }
+    [data-testid="metric-container"] { background-color: #161b27; border: 1px solid #2a3040; border-radius: 8px; padding: 18px 20px; }
+    [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #f5a623 !important; font-family: 'IBM Plex Mono', monospace; }
+    div[data-testid="stButton"] > button { background: linear-gradient(135deg, #f5a623, #e8860d); color: #0f1117; font-weight: 600; }
+    .panel-card { background: #1a2235; border: 1px solid #2a3a50; border-left: 3px solid #f5a623; border-radius: 8px; padding: 14px 16px; margin-top: 8px; }
+    .pc-tipo { color: #f5a623; font-weight: 600; font-size: 0.70rem; text-transform: uppercase; }
+    .pc-modelo { color: #e8e0d0; font-size: 0.85rem; font-weight: 600; }
+    .pc-tag { display: inline-block; background: #0f1117; border: 1px solid #2a3a50; border-radius: 4px; padding: 3px 10px; font-size: 0.72rem; color: #4ecdc4; }
 </style>
 """, unsafe_allow_html=True)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 6 — SESSION STATE
-# ─────────────────────────────────────────────────────────────────────────────
-for _key, _default in [
-    ("df_motor",      None),
-    ("energia_anual", None),
-    ("sim_ok",        False),
-    ("panel_usado",   "Monofacial"),
-    ("gb_usado",      0.0),
-]:
-    if _key not in st.session_state:
-        st.session_state[_key] = _default
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 7 — TÍTULO PRINCIPAL
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("# ☀️ Análisis de Viabilidad Energética Fotovoltaica")
-st.markdown(
-    "<p style='color:#8892a4;font-size:0.82rem;margin-top:-12px;"
-    "font-family:IBM Plex Mono;'>"
-    "Simulación anual · Resolución 15 min · Motor pvlib</p>",
-    unsafe_allow_html=True,
-)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 8 — BARRA LATERAL
-# ─────────────────────────────────────────────────────────────────────────────
+# ── BARRA LATERAL ────────────────────────────────────────────────────────────
 with st.sidebar:
+    st.markdown("### 1. Ubicación")
+    estado_sel = st.selectbox("Estado de la República", options=list(ESTADOS_MEXICO.keys()))
+    lat_def, lon_def, alt_def = ESTADOS_MEXICO[estado_sel]
+    
+    col1, col2 = st.columns(2)
+    latitud = col1.number_input("Latitud (°)", value=lat_def if lat_def else 25.6866, format="%.4f")
+    longitud = col2.number_input("Longitud (°)", value=lon_def if lon_def else -100.3161, format="%.4f")
+    altura = st.number_input("Altitud (msnm)", value=alt_def if alt_def else 540.0, format="%.0f")
 
-    # ── Ubicación ────────────────────────────────────────────────────────────
-    st.markdown("### Ubicación del Sistema")
+    st.markdown("### 2. Orientación del Arreglo")
+    tilt_opt = get_tilt_optimo(latitud, longitud, altura)
+    st.info(f"📐 Ángulo óptimo calculado: **{tilt_opt:.1f}°**")
+    
+    c_tilt, c_az = st.columns(2)
+    tilt = c_tilt.number_input("Inclinación (°)", value=float(tilt_opt), step=1.0)
+    acimut = c_az.number_input("Acimut (°)", value=0.0, help="0° = Sur, 90° = Oeste, -90° = Este", step=5.0)
 
-    latitud = st.number_input(
-        "Latitud (°)", min_value=-90.0, max_value=90.0,
-        value=25.6866, step=0.0001, format="%.4f",
-        help="Rango: −90 (polo sur) a 90 (polo norte).",
-    )
-    longitud = st.number_input(
-        "Longitud (°)", min_value=-180.0, max_value=180.0,
-        value=-100.3161, step=0.0001, format="%.4f",
-        help="Rango: −180 a 180.",
-    )
-    altura = st.number_input(
-        "Altitud sobre nivel del mar (m)", min_value=0.0,
-        value=1450.0, step=1.0, format="%.0f",
-        help="Altitud del sitio de instalación en metros sobre el nivel del mar.",
-    )
+    st.markdown("### 3. Perfil de Consumo")
+    tipo_demanda = st.radio("Formato de entrada", ["Anual", "Mensual"], horizontal=True)
+    kwh_anual = 0.0
+    kwh_mensuales = [0.0]*12
 
-    st.markdown("---")
-
-    # ── Selector de panel ─────────────────────────────────────────────────────
-    st.markdown("### Panel Solar")
-
-    tipo_panel = st.selectbox(
-        "Tipo de módulo",
-        options=list(PANELES.keys()),
-        format_func=lambda k: PANELES[k]["label"],
-        key="select_tipo_panel_bifacial_unique",
-    )
-
-    p = PANELES[tipo_panel]
-
-    # ── Ficha ejecutiva ───────────────────────────────────────────────────────
-    st.markdown(
-        f"<div class='panel-card'>"
-        f"  <div class='pc-tipo'>{p['label']}</div>"
-        f"  <div class='pc-fabr'>{p['fabricante']}</div>"
-        f"  <div class='pc-modelo'>{p['modelo_completo']}</div>"
-        f"  <span class='pc-tag'>{p['potencia_w']} W</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    # ── Slider de superficie (solo bifacial) ──────────────────────────────────
-    if tipo_panel == "Bifacial":
-        st.markdown("<div style='margin-top:14px'></div>", unsafe_allow_html=True)
-
-        gb_pct = st.slider(
-            "Tipo de Superficie (Beneficio Bifacial %)",
-            min_value=5,
-            max_value=25,
-            value=15,
-            step=1,
-            format="%d%%",
-            key="slider_gb_bifacial_unique",
-            help="El beneficio adicional de la cara trasera depende del albedo del suelo.",
-        )
-        gb = gb_pct / 100.0
-
-        st.markdown(
-            f"<div class='superficie-label'>{_etiqueta_superficie(gb_pct)}</div>",
-            unsafe_allow_html=True,
-        )
+    if tipo_demanda == "Anual":
+        kwh_anual = st.number_input("Consumo Anual Total (kWh)", value=100_000.0, step=5000.0)
     else:
-        gb     = 0.0
-        gb_pct = 0
+        st.caption("Consumo mensual (kWh)")
+        for i in range(12):
+            kwh_mensuales[i] = st.number_input(MESES_STR[i], value=8500.0, step=500.0, key=f"mes_{i}")
 
-    st.markdown("---")
+    st.markdown("### 4. Tecnología")
+    tipo_panel = st.selectbox("Tipo de módulo", options=["monofacial", "bifacial_jinko"], format_func=lambda k: PANELES[k]["nombre"])
+    p = PANELES[tipo_panel]
+    st.markdown(f"<div class='panel-card'><div class='pc-tipo'>{p['nombre']}</div><div class='pc-modelo'>{p['modelo']}</div><span class='pc-tag'>{p['potencia_w']} W</span></div>", unsafe_allow_html=True)
 
-    # ── Carga del CSV de demanda ───────────────────────────────────────────────
-    st.markdown("### Curva de Demanda")
-
-    archivo_csv = st.file_uploader(
-        "Sube el CSV de demanda de la empresa",
-        type=["csv", "txt"],
-        key="uploader_demanda_unique",
-        help=(
-            "Columna numérica de potencia (kW). "
-            "Idealmente 35 040 filas (año completo a 15 min). "
-            "El motor interpola automáticamente si el tamaño difiere."
-        ),
-    )
-
-    df_cargado = None
-    if archivo_csv is not None:
-        try:
-            df_cargado = pd.read_csv(archivo_csv)
-            st.success(
-                f"✓ {archivo_csv.name}  ·  "
-                f"{df_cargado.shape[0]:,} filas × {df_cargado.shape[1]} cols"
-            )
-        except Exception as e:
-            st.error(f"Error al leer el CSV: {e}")
+    gb = 0.0
+    if p["bifacial"]:
+        gb = st.slider("Beneficio Bifacial (%)", 5, 25, 15) / 100.0
 
     st.markdown("---")
     boton_ejecutar = st.button("▶ Ejecutar Simulación", use_container_width=True)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 9 — EJECUCIÓN DE LA SIMULACIÓN
+#  EJECUCIÓN
 # ─────────────────────────────────────────────────────────────────────────────
 if boton_ejecutar:
-    if df_cargado is None:
-        st.warning("Sube un archivo CSV de demanda antes de ejecutar la simulación.")
-    else:
-        with st.spinner("Ejecutando simulación anual — puede tardar unos segundos…"):
-            try:
-                df_motor, energia_anual = calcular_viabilidad(
-                    lat=latitud,
-                    lon=longitud,
-                    altura=altura,
-                    df_demanda=df_cargado,
-                    tipo_panel=tipo_panel,
-                    gb=gb,
-                )
-                df_motor["Fecha_Hora"] = pd.to_datetime(df_motor["Fecha_Hora"])
-
-                st.session_state["df_motor"]      = df_motor
-                st.session_state["energia_anual"] = energia_anual
-                st.session_state["sim_ok"]        = True
-                st.session_state["panel_usado"]   = tipo_panel
-                st.session_state["gb_usado"]      = gb
-
-            except Exception as e:
-                st.session_state["sim_ok"] = False
-                st.error(f"Error en el motor de cálculo: {e}")
-                with st.expander("Ver detalles del error"):
-                    st.code(traceback.format_exc(), language="python")
-
+    with st.spinner("Ejecutando motor termodinámico y cálculo de irradiancia POA..."):
+        try:
+            df_motor, energia_anual = calcular_viabilidad(
+                latitud, longitud, altura, tipo_demanda, kwh_mensuales, kwh_anual, 
+                tilt, acimut, tipo_panel, gb
+            )
+            st.session_state.update({"df_motor": df_motor, "energia_anual": energia_anual, "sim_ok": True})
+        except Exception as e:
+            st.error(f"Error en el motor de cálculo: {e}")
+            st.code(traceback.format_exc(), language="python")
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SECCIÓN 10 — RESULTADOS
+#  RESULTADOS
 # ─────────────────────────────────────────────────────────────────────────────
-if st.session_state["sim_ok"] and st.session_state["df_motor"] is not None:
-
-    df_motor: pd.DataFrame = st.session_state["df_motor"]
-    energia_anual: float   = st.session_state["energia_anual"]
-    panel_usado: str       = st.session_state["panel_usado"]
-    gb_usado: float        = st.session_state["gb_usado"]
-    p_usado                = PANELES[panel_usado]
-
-    # ── Badge "Panel simulado" ────────────────────────────────────────────────
-    if panel_usado == "Bifacial":
-        badge_txt = (
-            f"Panel simulado: Bifacial — Jinko Solar {p_usado['modelo_corto']}"
-            f"  ·  Superficie: {gb_usado * 100:.0f}%"
-        )
-    else:
-        badge_txt = (
-            f"Panel simulado: Monofacial — Jinko Solar {p_usado['modelo_corto']}"
-        )
-
-    st.markdown(
-        f"<div class='panel-badge'>{badge_txt}</div>",
-        unsafe_allow_html=True,
-    )
-
-    fecha_min = df_motor["Fecha_Hora"].min().date()
-    fecha_max = df_motor["Fecha_Hora"].max().date()
-
-    # ── Filtro temporal ───────────────────────────────────────────────────────
-    st.markdown("### Ventana de Visualización")
-
-    col_fi, col_ff = st.columns(2)
-    with col_fi:
-        fecha_inicio = st.date_input(
-            "Desde", value=fecha_min,
-            min_value=fecha_min, max_value=fecha_max,
-            key="date_desde",
-        )
-    with col_ff:
-        fecha_fin = st.date_input(
-            "Hasta",
-            value=min(fecha_min + timedelta(days=6), fecha_max),
-            min_value=fecha_min, max_value=fecha_max,
-            key="date_hasta",
-        )
-
-    if fecha_inicio > fecha_fin:
-        st.warning("La fecha de inicio no puede ser posterior a la de fin.")
-        st.stop()
-
-    df_vis = _filtrar_rango(df_motor, fecha_inicio, fecha_fin)
-    if df_vis.empty:
-        st.warning("No hay datos en el rango seleccionado.")
-        st.stop()
-
-    # ── Indicadores anuales ───────────────────────────────────────────────────
-    st.markdown("### Indicadores Anuales")
-
-    pico_kw      = float(df_motor["Generacion_Solar_kW"].max())
+if st.session_state.get("sim_ok"):
+    df_motor = st.session_state["df_motor"]
+    
+    # ── MÉTRICAS SUPERIORES ──────────────────────────────────────────────────
     dem_orig_kwh = float(df_motor["Demanda_kW"].sum() * 0.25)
     dem_post_kwh = float(df_motor["Demanda_Post_Inyeccion_Solar_kW"].sum() * 0.25)
-    ahorro_kwh   = dem_orig_kwh - dem_post_kwh
-    pct_ahorro   = (ahorro_kwh / dem_orig_kwh * 100) if dem_orig_kwh > 0 else 0.0
-    hsp          = energia_anual / pico_kw if pico_kw > 0 else 0.0
+    ahorro_kwh = dem_orig_kwh - dem_post_kwh
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Consumo Anual Original", f"{dem_orig_kwh:,.0f} kWh")
+    m2.metric("Generación Solar Anual", f"{st.session_state['energia_anual']:,.0f} kWh")
+    m3.metric("Consumo Anual Residual", f"{dem_post_kwh:,.0f} kWh", delta=f"{-ahorro_kwh/dem_orig_kwh*100:.1f}%", delta_color="inverse")
 
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("Energía Solar Generada",  f"{energia_anual:,.0f} kWh", delta="Anual")
-    with m2:
-        st.metric("Pico Máximo",             f"{pico_kw:,.1f} kW",        delta="Instantáneo")
-    with m3:
-        st.metric("Energía Ahorrada en Red", f"{ahorro_kwh:,.0f} kWh",
-                  delta=f"{pct_ahorro:.1f}% de la demanda")
-    with m4:
-        st.metric("Horas Pico Equivalentes", f"{hsp:,.0f} h/año",         delta="HSP anuales")
+    st.markdown("---")
+    
+    # ── GRÁFICO 1: BALANCE MENSUAL DE ENERGÍA (BARRAS) ───────────────────────
+    st.markdown("### Balance Energético Mensual (kWh)")
+    df_motor["Mes"] = df_motor["Fecha_Hora"].dt.month
+    df_mes = df_motor.groupby("Mes")[["Demanda_kW", "Generacion_Solar_kW", "Demanda_Post_Inyeccion_Solar_kW"]].sum() * 0.25
+    
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Demanda_kW"], name="Consumo Total", marker_color="#ff6b6b"))
+    fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Generacion_Solar_kW"], name="Generación Solar", marker_color="#f5a623"))
+    fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Demanda_Post_Inyeccion_Solar_kW"], name="Consumo Residual (Red)", marker_color="#4ecdc4"))
+    
+    fig_bar.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f", barmode='group',
+        font=dict(family="IBM Plex Mono", color="#8892a4"), height=350,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
 
     st.markdown("---")
 
-    # ── Gráfica 1: Gtot POA vs Demanda Eléctrica Industrial (doble eje Y) ────
-    # Construida con make_subplots secondary_y=True para que ambas series sean
-    # legibles a pesar de sus unidades distintas (kW y W/m²).
-    st.markdown("### Gtot POA vs Demanda Eléctrica Industrial")
+    # ── FILTRO TEMPORAL PARA SERIES DE TIEMPO ────────────────────────────────
+    st.markdown("### Análisis Dinámico en Alta Resolución (15 min)")
+    fecha_min = df_motor["Fecha_Hora"].min().date()
+    fecha_max = df_motor["Fecha_Hora"].max().date()
+    
+    col_fi, col_ff = st.columns(2)
+    with col_fi:
+        fecha_inicio = st.date_input("Desde", value=fecha_min, min_value=fecha_min, max_value=fecha_max)
+    with col_ff:
+        fecha_fin = st.date_input("Hasta", value=min(fecha_min + timedelta(days=6), fecha_max), min_value=fecha_min, max_value=fecha_max)
 
-    from plotly.subplots import make_subplots
+    df_vis = _filtrar_rango(df_motor, fecha_inicio, fecha_fin)
 
-    _PLOT_BG   = "#12171f"
-    _GRID_COL  = "#1e2535"
-    _AXIS_COL  = "#2a3040"
-    _FONT_COL  = "#8892a4"
-    _LABEL_COL = "#c8bfae"
-
+    # ── GRÁFICO 2: DEMANDA VS IRRADIANCIA (DOBLE EJE Y) ──────────────────────
     fig1 = make_subplots(specs=[[{"secondary_y": True}]])
-
-    # Eje Y izquierdo — Demanda (kW)
     fig1.add_trace(
-        go.Scatter(
-            x=df_vis["Fecha_Hora"],
-            y=df_vis["Demanda_kW"],
-            name="Demanda Industrial (kW)",
-            mode="lines",
-            line=dict(color="#ff6b6b", width=1.8),
-            hovertemplate="%{x|%d %b %H:%M}<br>Demanda: <b>%{y:.1f} kW</b><extra></extra>",
-        ),
+        go.Scatter(x=df_vis["Fecha_Hora"], y=df_vis["Demanda_kW"], name="Demanda (kW)", mode="lines", line=dict(color="#ff6b6b", width=1.8)),
         secondary_y=False,
     )
-
-    # Eje Y derecho — Irradiancia POA (W/m²)
     fig1.add_trace(
-        go.Scatter(
-            x=df_vis["Fecha_Hora"],
-            y=df_vis["Gtot_POA_Wm2"],
-            name="Gtot POA (W/m²)",
-            mode="lines",
-            line=dict(color="#f5a623", width=1.5),
-            hovertemplate="%{x|%d %b %H:%M}<br>Gtot POA: <b>%{y:.1f} W/m²</b><extra></extra>",
-        ),
+        go.Scatter(x=df_vis["Fecha_Hora"], y=df_vis["Gtot_POA_Wm2"], name="Gtot POA (W/m²)", mode="lines", line=dict(color="#f5a623", width=1.5)),
         secondary_y=True,
     )
-
     fig1.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor=_PLOT_BG,
-        font=dict(family="IBM Plex Mono", color=_FONT_COL, size=11),
-        hovermode="x unified",
-        height=340,
-        margin=dict(l=60, r=60, t=40, b=50),
-        hoverlabel=dict(
-            bgcolor="#1e2535", bordercolor="#3a4a5c",
-            font=dict(family="IBM Plex Mono", color="#e8e0d0", size=11),
-        ),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-            font=dict(color="#c8bfae", size=11), bgcolor="rgba(0,0,0,0)",
-        ),
-        xaxis=dict(
-            gridcolor=_GRID_COL, linecolor=_AXIS_COL,
-            tickfont=dict(color=_FONT_COL),
-        ),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f", font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+        hovermode="x unified", height=320, margin=dict(l=60, r=60, t=40, b=30),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    # Eje Y izquierdo — kW (rojo)
-    fig1.update_yaxes(
-        title_text="Demanda (kW)",
-        title_font=dict(color="#ff6b6b"),
-        tickfont=dict(color="#ff6b6b"),
-        gridcolor=_GRID_COL,
-        linecolor=_AXIS_COL,
-        secondary_y=False,
-    )
-    # Eje Y derecho — W/m² (naranja)
-    fig1.update_yaxes(
-        title_text="Irradiancia POA (W/m²)",
-        title_font=dict(color="#f5a623"),
-        tickfont=dict(color="#f5a623"),
-        gridcolor="rgba(0,0,0,0)",   # sin grilla en el eje secundario para no saturar
-        showgrid=False,
-        secondary_y=True,
-    )
+    fig1.update_yaxes(title_text="Demanda (kW)", title_font=dict(color="#ff6b6b"), tickfont=dict(color="#ff6b6b"), gridcolor="#1e2535", secondary_y=False)
+    fig1.update_yaxes(title_text="Irradiancia POA (W/m²)", title_font=dict(color="#f5a623"), tickfont=dict(color="#f5a623"), showgrid=False, secondary_y=True)
+    st.plotly_chart(fig1, use_container_width=True)
 
-    st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
-
-    # ── Gráfica 2: Generación solar ───────────────────────────────────────────
-    st.markdown("### Generación Solar  ·  (kW)")
-
+    # ── GRÁFICO 3: GENERACIÓN SOLAR (kW) ─────────────────────────────────────
     fig2 = _make_fig()
     fig2.add_trace(go.Scatter(
-        x=df_vis["Fecha_Hora"], y=df_vis["Generacion_Solar_kW"],
-        name="Generación Solar", mode="lines", fill="tozeroy",
-        line=dict(color="#ffe033", width=1.5),
-        fillcolor="rgba(255,224,51,0.12)",
-        hovertemplate="%{x|%d %b %H:%M}<br><b>%{y:.2f} kW</b><extra></extra>",
+        x=df_vis["Fecha_Hora"], y=df_vis["Generacion_Solar_kW"], name="Generación Solar", 
+        mode="lines", fill="tozeroy", line=dict(color="#ffe033", width=1.5), fillcolor="rgba(255,224,51,0.12)"
     ))
-    fig2.update_layout(yaxis_title="kW", xaxis_title="")
-    st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+    fig2.update_layout(yaxis_title="kW", xaxis_title="", height=280, margin=dict(t=20, b=20))
+    st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Gráfica 3: Comparativa de carga ──────────────────────────────────────
-    st.markdown("### Comparativa de Carga  ·  Demanda Original vs. Post-Inyección (kW)")
+    st.markdown("---")
 
-    fig3 = _make_fig()
-    fig3.add_trace(go.Scatter(
-        x=df_vis["Fecha_Hora"], y=df_vis["Demanda_Post_Inyeccion_Solar_kW"],
-        name="Post-Inyección Solar", mode="lines", fill="tozeroy",
-        line=dict(color="#4ecdc4", width=1.8),
-        fillcolor="rgba(78,205,196,0.12)",
-        hovertemplate="%{x|%d %b %H:%M}<br>Post-Inyección: <b>%{y:.2f} kW</b><extra></extra>",
-    ))
-    fig3.add_trace(go.Scatter(
-        x=df_vis["Fecha_Hora"], y=df_vis["Demanda_kW"],
-        name="Demanda Original", mode="lines",
-        line=dict(color="#ff6b6b", width=1.8, dash="dot"),
-        hovertemplate="%{x|%d %b %H:%M}<br>Demanda: <b>%{y:.2f} kW</b><extra></extra>",
-    ))
-    fig3.update_layout(
-        yaxis_title="kW", xaxis_title="Fecha / Hora",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-            font=dict(color="#c8bfae", size=11), bgcolor="rgba(0,0,0,0)",
-        ),
-    )
-    st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar": False})
-
-    # ── Matriz de Irradiancia POA  96 × 12 ───────────────────────────────────
-    # Usa el DataFrame anual completo (df_motor), NO el rango filtrado (df_vis),
-    # para que siempre se muestre la matriz del año completo independientemente
-    # del selector de fechas.
-    st.markdown(
-        "### Matriz de Irradiancia POA  ·  "
-        "Promedio Quinceminutal por Mes  (W/m²)"
-    )
-
+    # ── GRÁFICO 4: MATRIZ DE IRRADIANCIA POA (MAPA DE CALOR) ─────────────────
+    st.markdown("### Matriz de Irradiancia POA Anual (W/m²)")
     _z, _y_lbl, _x_lbl = _matriz_irradiancia(df_motor)
-
-    # customdata 2D (96 × 12): cada celda lleva la etiqueta de hora de su fila
     _custom = np.array([[_y_lbl[r] for _ in range(12)] for r in range(96)])
 
-    # 1. Definimos una escala tipo Inferno manual. 
-    # El valor 0.00 está forzado al color exacto de tu fondo (#12171f) para que se vea negro/transparente.
     escala_inferno_negro = [
-        [0.00, "#12171f"],  # <--- Negro / Fondo del layout
-        [0.11, "#1b0c41"],
-        [0.22, "#4a0c6b"],
-        [0.33, "#781c6d"],
-        [0.44, "#a52c60"],
-        [0.55, "#cf4446"],
-        [0.66, "#ed6925"],
-        [0.77, "#fb9b06"],
-        [0.88, "#f7d13d"],
-        [1.00, "#fcffa4"]
+        [0.00, "#12171f"], [0.11, "#1b0c41"], [0.22, "#4a0c6b"], [0.33, "#781c6d"],
+        [0.44, "#a52c60"], [0.55, "#cf4446"], [0.66, "#ed6925"], [0.77, "#fb9b06"],
+        [0.88, "#f7d13d"], [1.00, "#fcffa4"]
     ]
 
     fig_hm = go.Figure(go.Heatmap(
-        z=_z,
-        x=_x_lbl,
-        y=list(range(96)),            # índices numéricos 0–95
-        colorscale=escala_inferno_negro, # <--- Usamos la escala manual aquí
-        zmin = 0, 
-        zmax = np.max(_z),
-        customdata=_custom,
-        hovertemplate=(
-            "Mes: <b>%{x}</b><br>"
-            "Hora: <b>%{customdata}</b><br>"
-            "Irradiancia: <b>%{z:.1f} W/m²</b>"
-            "<extra></extra>"
-        ),
-        colorbar=dict(
-            title=dict(
-                text="Irradiancia (W/m²)",
-                side="right",
-                font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
-            ),
-            tickfont=dict(family="IBM Plex Mono", color="#8892a4", size=10),
-            thickness=14,
-            outlinecolor="#2a3040",
-            outlinewidth=1,
-        ),
+        z=_z, x=_x_lbl, y=list(range(96)), colorscale=escala_inferno_negro, 
+        zmin=0, zmax=np.max(_z), customdata=_custom,
+        hovertemplate="Mes: <b>%{x}</b><br>Hora: <b>%{customdata}</b><br>Irradiancia: <b>%{z:.1f} W/m²</b><extra></extra>",
     ))
-    # Marcas de hora cada 2 h (cada 8 slots de 15 min): 00:00, 02:00 … 22:00
+    
     _tick_slots = list(range(0, 96, 8))
-
     fig_hm.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
-        font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
-        xaxis=dict(
-            side="bottom",
-            title=dict(text="Mes", font=dict(color="#c8bfae", size=11)),
-            tickfont=dict(color="#8892a4"),
-            linecolor="#2a3040",
-        ),
-        yaxis=dict(
-            autorange="reversed",               # 00:00 en la parte superior
-            tickvals=_tick_slots,
-            ticktext=[_y_lbl[i] for i in _tick_slots],
-            title=dict(text="Hora del día", font=dict(color="#c8bfae", size=11)),
-            tickfont=dict(color="#8892a4"),
-            linecolor="#2a3040",
-            gridcolor="#1e2535",
-        ),
-        margin=dict(l=60, r=20, t=20, b=50),
-        height=520,
-        hoverlabel=dict(
-            bgcolor="#1e2535",
-            bordercolor="#3a4a5c",
-            font=dict(family="IBM Plex Mono", color="#e8e0d0", size=11),
-        ),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f", font=dict(family="IBM Plex Mono", color="#8892a4"),
+        xaxis=dict(side="bottom", linecolor="#2a3040"),
+        yaxis=dict(autorange="reversed", tickvals=_tick_slots, ticktext=[_y_lbl[i] for i in _tick_slots], gridcolor="#1e2535"),
+        height=500, margin=dict(l=60, r=20, t=20, b=30)
     )
-    st.plotly_chart(fig_hm, use_container_width=True, theme=None, config={"displayModeBar": False})
-    # ── Tabla y descarga ───────────────────────────────────────────────────────
-    st.markdown("---")
-    with st.expander("Ver datos tabulares del período seleccionado"):
-        st.dataframe(df_vis.reset_index(drop=True), use_container_width=True, height=280)
-
-    st.download_button(
-        label="⬇ Descargar resultados anuales completos (CSV)",
-        data=df_motor.to_csv(index=False).encode("utf-8"),
-        file_name="resultados_fotovoltaicos_anuales.csv",
-        mime="text/csv",
-    )
-
-#  ESTADO INICIAL — antes de la primera simulación
-else:
-    st.info(
-        "Configura la ubicación y sube tu curva de demanda en la barra lateral. "
-        "Luego presiona **▶ Ejecutar Simulación** para ver los resultados."
-    )
+    st.plotly_chart(fig_hm, use_container_width=True)

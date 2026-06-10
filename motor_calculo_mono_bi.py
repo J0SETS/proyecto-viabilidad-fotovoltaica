@@ -3,17 +3,16 @@ import numpy as np
 import pvlib
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 
-
+# =============================================================================
 #  CATÁLOGO DE PANELES
-#  Cada entrada define los parámetros que consume calcular_viabilidad().
-
+# =============================================================================
 PANELES = {
     "monofacial": {
         "nombre":           "Monofacial",
         "fabricante":       "Jinko Solar",
         "modelo":           "Tiger Neo 72HC — JKM605N-72HL4",
         "potencia_w":       605,
-        "potencia_pico_dc": 399_300.0,   # Wp totales del sistema (sin cambio)
+        "potencia_pico_dc": 399_300.0,
         "gamma_pdc":        -0.0029,
         "bifacial":         False,
     },
@@ -29,18 +28,90 @@ PANELES = {
     },
 }
 
+# =============================================================================
+#  FUNCIONES DE SOPORTE MATEMÁTICO Y PERFILADO
+# =============================================================================
+def calcular_tilt_optimo(lat: float, lon: float, altura: float) -> float:
+    """
+    Realiza un barrido heurístico rápido para encontrar el ángulo de inclinación (tilt)
+    que maximiza la irradiancia anual, asumiendo un acimut orientado al sur (180° en pvlib).
+    """
+    # Usamos una resolución menor (1 hora) para que el barrido sea instantáneo
+    tiempos = pd.date_range("2026-01-01", "2026-12-31 23:00", freq="1h", tz="America/Mexico_City")
+    sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon)
+    
+    airmass = pvlib.atmosphere.get_relative_airmass(sol["apparent_zenith"])
+    airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass, pvlib.atmosphere.alt2pres(altura))
+    
+    cs = pvlib.clearsky.ineichen(
+        sol["apparent_zenith"], 
+        airmass_absolute=airmass_abs, 
+        linke_turbidity=3, 
+        altitude=altura
+    )
 
+    best_tilt = lat
+    max_poa = 0.0
+    
+    # Barrido heurístico de +/- 15 grados alrededor de la latitud local
+    rango_tilt = np.arange(max(0, lat - 15), lat + 15, 1.0)
+    
+    for t in rango_tilt:
+        poa = pvlib.irradiance.get_total_irradiance(
+            surface_tilt=t, 
+            surface_azimuth=180,  # 180° = Sur en el estándar de pvlib
+            solar_zenith=sol["apparent_zenith"], 
+            solar_azimuth=sol["azimuth"],
+            dni=cs["dni"], 
+            ghi=cs["ghi"], 
+            dhi=cs["dhi"]
+        )
+        total = poa['poa_global'].sum()
+        if total > max_poa:
+            max_poa = total
+            best_tilt = t
+            
+    return float(best_tilt)
+
+def generar_perfil_demanda(tipo_demanda: str, kwh_mensuales: list, kwh_anual: float, tiempos_naive: pd.DatetimeIndex) -> np.ndarray:
+    """
+    Distribuye el consumo de energía (kWh) en intervalos de potencia (kW) de 15 minutos
+    para mantener la compatibilidad con el motor de alta resolución.
+    """
+    df_d = pd.DataFrame(index=tiempos_naive)
+    df_d['mes'] = df_d.index.month
+
+    if tipo_demanda == "Anual":
+        # Distribución plana a lo largo de todo el año
+        kw_constante = kwh_anual / (365 * 24)
+        df_d['Demanda_kW'] = kw_constante
+    else:
+        # Distribución plana, pero segmentada por los días que tiene cada mes
+        df_d['Demanda_kW'] = 0.0
+        for mes in range(1, 13):
+            mask = df_d['mes'] == mes
+            horas_mes = mask.sum() * 0.25  # Cada fila representa 15 min (0.25 horas)
+            if horas_mes > 0:
+                df_d.loc[mask, 'Demanda_kW'] = kwh_mensuales[mes-1] / horas_mes
+                
+    return df_d['Demanda_kW'].values
+
+# =============================================================================
+#  MOTOR PRINCIPAL DE SIMULACIÓN
+# =============================================================================
 def calcular_viabilidad(
     lat: float,
     lon: float,
     altura: float,
-    df_demanda: pd.DataFrame,
+    tipo_demanda: str,
+    kwh_mensuales: list,
+    kwh_anual: float,
+    tilt: float,
+    acimut_usuario: float,
     tipo_panel: str = "monofacial",
     gb: float = 0.15,
 ):
-
-    # SELECCIÓN DE PANEL
-
+    # 1. SELECCIÓN DE PANEL
     if tipo_panel not in PANELES:
         raise ValueError(
             f"tipo_panel='{tipo_panel}' no reconocido. "
@@ -48,30 +119,20 @@ def calcular_viabilidad(
         )
     panel = PANELES[tipo_panel]
 
-
-    # ÍNDICE TEMPORAL  (año completo, intervalos de 15 min, zona horaria local)
-
+    # 2. ÍNDICE TEMPORAL (Resolución 15 min)
     tz = 'America/Mexico_City'
     tiempos = pd.date_range(
-        start='2026-12-21 00:00',
-        end='2027-12-20 23:45',
+        start='2026-01-01 00:00',
+        end='2026-12-31 23:45',
         freq='15min',
         tz=tz,
     )
-    # Versión sin zona horaria para el DataFrame final (más amigable para Plotly)
     tiempos_naive = tiempos.tz_localize(None)
 
-
-    # POSICIÓN SOLAR
-
+    # 3. POSICIÓN SOLAR Y CIELO DESPEJADO
     sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon)
-
-
-    # IRRADIANCIA EN CIELO DESPEJADO (modelo Ineichen)
     airmass = pvlib.atmosphere.get_relative_airmass(sol['apparent_zenith'])
-    airmass_abs = pvlib.atmosphere.get_absolute_airmass(
-        airmass, pvlib.atmosphere.alt2pres(altura)
-    )
+    airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass, pvlib.atmosphere.alt2pres(altura))
 
     clearsky = pvlib.clearsky.ineichen(
         sol['apparent_zenith'],
@@ -80,9 +141,14 @@ def calcular_viabilidad(
         altitude=altura,
     )
 
+    # 4. TRANSFORMACIÓN DE ACIMUT
+    # pvlib usa 0=Norte, 90=Este, 180=Sur, 270=Oeste.
+    # El usuario ingresa: 0=Sur, -90=Este, 90=Oeste.
+    acimut_pvlib = (acimut_usuario + 180) % 360
+
     irradiance_poa = pvlib.irradiance.get_total_irradiance(
-        surface_tilt=25,
-        surface_azimuth=180,
+        surface_tilt=tilt,
+        surface_azimuth=acimut_pvlib,
         solar_zenith=sol['apparent_zenith'],
         solar_azimuth=sol['azimuth'],
         dni=clearsky['dni'],
@@ -90,53 +156,22 @@ def calcular_viabilidad(
         dhi=clearsky['dhi'],
     )
 
-    # CONSTRUCCIÓN DEL DATAFRAME BASE
+    # 5. CONSTRUCCIÓN DEL DATAFRAME BASE Y DEMANDA SINTÉTICA
     df_motor = pd.DataFrame(index=tiempos_naive)
-    df_motor['Gtot_POA_Wm2'] = irradiance_poa['poa_global'].values
-
-    # ALINEACIÓN DE LA CURVA DE DEMANDA
-    try:
-        if isinstance(df_demanda, str):
-            df_demanda = pd.read_csv(df_demanda, index_col=0, parse_dates=True)
-
-        col_demanda = 'Demanda_kW' if 'Demanda_kW' in df_demanda.columns else df_demanda.columns[0]
-        serie_demanda = pd.to_numeric(df_demanda[col_demanda], errors='coerce').fillna(0).values
-
-        if len(serie_demanda) == len(tiempos_naive):
-            df_motor['Demanda_kW'] = serie_demanda
-        else:
-            s_tmp = pd.Series(serie_demanda)
-            s_resampled = (
-                s_tmp.reindex(pd.RangeIndex(len(tiempos_naive)))
-                     .interpolate(method='linear')
-                     .bfill()
-                     .ffill()
-            )
-            df_motor['Demanda_kW'] = s_resampled.values
-
-    except Exception:
-        rng = np.random.default_rng(seed=42)
-        df_motor['Demanda_kW'] = rng.uniform(150, 300, len(tiempos_naive))
+    df_motor['Gtot_POA_Wm2'] = irradiance_poa['poa_global'].clip(lower=0).fillna(0).values
+    df_motor['Demanda_kW'] = generar_perfil_demanda(tipo_demanda, kwh_mensuales, kwh_anual, tiempos_naive)
 
     # 6. MODELADO ENERGÉTICO
-    gamma_pdc        = panel['gamma_pdc']
-    potencia_pico_dc = panel['potencia_pico_dc']   # Wp base del sistema
+    gamma_pdc = panel['gamma_pdc']
+    potencia_pico_dc = panel['potencia_pico_dc']
 
-    # --- Ganancia bifacial ---------------------------------------------------
-    # Para el panel bifacial se escala la potencia pico DC efectiva antes de
-    # pasarla a pvwatts_dc, aplicando la fórmula:
-    #
-    #   P_ef = P_STC × (1 + G_b)
-    #
-    # donde G_b es la ganancia trasera configurada por el usuario.
-    # Para el monofacial G_b = 0, por lo que potencia_ef == potencia_pico_dc.
     if panel['bifacial']:
-        gb_efectivo    = float(np.clip(gb, 0.0, 1.0))   # Seguridad: acota entre 0 y 100 %
+        gb_efectivo = float(np.clip(gb, 0.0, 1.0))
         potencia_ef_dc = potencia_pico_dc * (1.0 + gb_efectivo)
     else:
         potencia_ef_dc = potencia_pico_dc
 
-    temp_params = TEMPERATURE_MODEL_PARAMETERS['sapm']['open_rack_glass_glass']
+    temp_params = TEMPERATURE_MODEL_PARAMETERS['sapm']['close_mount_glass_glass']
     temp_celda = pvlib.temperature.sapm_cell(
         poa_global=df_motor['Gtot_POA_Wm2'],
         temp_air=20.0,
@@ -147,21 +182,19 @@ def calcular_viabilidad(
     pdc = pvlib.pvsystem.pvwatts_dc(
         effective_irradiance=df_motor['Gtot_POA_Wm2'],
         temp_cell=temp_celda,
-        pdc0=potencia_ef_dc,          # ← usa la potencia efectiva (bifacial o no)
+        pdc0=potencia_ef_dc,
         gamma_pdc=gamma_pdc,
     )
 
-    df_motor['Generacion_Solar_kW']           = (pdc / 1_000.0).clip(lower=0)
+    df_motor['Generacion_Solar_kW'] = (pdc / 1_000.0).clip(lower=0)
     df_motor['Demanda_Post_Inyeccion_Solar_kW'] = (
         df_motor['Demanda_kW'] - df_motor['Generacion_Solar_kW']
     ).clip(lower=0)
 
-
-    # 7. ENERGÍA ANUAL GENERADA  (kWh = kW × 0.25 h por intervalo de 15 min)
+    # 7. ENERGÍA ANUAL GENERADA
     energia_anual = float((df_motor['Generacion_Solar_kW'] * 0.25).sum())
 
-
-    # 8. PREPARAR DATAFRAME FINAL
+    # 8. SALIDA DE DATOS
     df_motor.index.name = 'Fecha_Hora'
     df_motor.reset_index(inplace=True)
 
