@@ -365,39 +365,64 @@ if st.session_state.get("sim_ok"):
     fig_temp_pct.update_layout(yaxis_title="%", height=300)
     st.plotly_chart(fig_temp_pct, use_container_width=True)
 
-    fig_temp_doble = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_temp_doble.add_trace(
+    # ── Temperaturas mensuales en un solo eje vertical ────────────────────────
+    fig_temp_un_eje = _make_fig("Temperatura ambiente y temperatura de celda mensual")
+
+    fig_temp_un_eje.add_trace(
         go.Scatter(
             x=df_temp_plot["Mes_Str"],
             y=df_temp_plot["Temperatura_Ambiente_Prom_C"],
             name="Temp. ambiente prom.",
             mode="lines+markers",
             line=dict(color="#4ecdc4", width=2),
-        ),
-        secondary_y=False,
+            marker=dict(size=7),
+            hovertemplate="<b>%{x}</b><br>Temp. ambiente prom.: %{y:.2f} °C<extra></extra>",
+        )
     )
-    fig_temp_doble.add_trace(
+
+    fig_temp_un_eje.add_trace(
         go.Scatter(
             x=df_temp_plot["Mes_Str"],
             y=df_temp_plot["Temperatura_Celda_Prom_C"],
             name="Temp. celda prom.",
             mode="lines+markers",
             line=dict(color="#f5a623", width=2),
-        ),
-        secondary_y=True,
+            marker=dict(size=7),
+            hovertemplate="<b>%{x}</b><br>Temp. celda prom.: %{y:.2f} °C<extra></extra>",
+        )
     )
-    fig_temp_doble.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
-        font=dict(family="IBM Plex Mono", color="#8892a4"),
-        hovermode="x unified",
+
+    fig_temp_un_eje.add_trace(
+        go.Scatter(
+            x=df_temp_plot["Mes_Str"],
+            y=df_temp_plot["Temperatura_Celda_Max_C"],
+            name="Temp. celda máx.",
+            mode="lines+markers",
+            line=dict(color="#ff6b6b", width=2, dash="dash"),
+            marker=dict(size=7),
+            hovertemplate="<b>%{x}</b><br>Temp. celda máx.: %{y:.2f} °C<extra></extra>",
+        )
+    )
+
+    fig_temp_un_eje.update_layout(
+        yaxis_title="Temperatura (°C)",
         height=320,
-        margin=dict(l=60, r=60, t=40, b=30),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
     )
-    fig_temp_doble.update_yaxes(title_text="Temp. ambiente (°C)", gridcolor="#1e2535", secondary_y=False)
-    fig_temp_doble.update_yaxes(title_text="Temp. celda (°C)", showgrid=False, secondary_y=True)
-    st.plotly_chart(fig_temp_doble, use_container_width=True)
+
+    fig_temp_un_eje.update_yaxes(
+        title_text="Temperatura (°C)",
+        gridcolor="#1e2535",
+    )
+
+    st.plotly_chart(fig_temp_un_eje, use_container_width=True)
 
     st.dataframe(df_temp_mensual, use_container_width=True)
     st.download_button(
