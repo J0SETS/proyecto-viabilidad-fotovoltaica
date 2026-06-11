@@ -1,9 +1,0 @@
-streamlit
-pvlib
-pandas
-plotly
-matplotlib
-numpy
-seaborn
-requests
-openpyxl
