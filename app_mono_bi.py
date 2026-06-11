@@ -1,9 +1,9 @@
 # =============================================================================
-# app_mono_bi.py — Interfaz de Usuario Fotovoltaica
+#  app_mono_bi.py — Interfaz de Usuario Fotovoltaica + BESS
 # =============================================================================
 
 import traceback
-from datetime import date, timedelta
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
@@ -11,19 +11,19 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+# Importamos la lógica matemática y catálogos desde el motor solar
 from motor_calculo_mono_bi import (
     PANELES,
     calcular_viabilidad,
     calcular_tilt_optimo,
-    descargar_clima_open_meteo,
-    resumen_penalizacion_temperatura_mensual,
 )
 
+# Importamos el motor de cálculo BESS
+from baterias import MotorBESS
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CATÁLOGOS Y CONSTANTES DE UI
+#  CATÁLOGOS Y CONSTANTES DE UI
 # ─────────────────────────────────────────────────────────────────────────────
-
 ESTADOS_MEXICO = {
     "Personalizado": (25.6866, -100.3161, 540.0),
     "Nuevo León (Monterrey)": (25.6866, -100.3161, 540.0),
@@ -38,23 +38,18 @@ ESTADOS_MEXICO = {
 
 MESES_STR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS DE VISUALIZACIÓN
+#  HELPERS DE VISUALIZACIÓN
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _make_fig(title: str = "") -> go.Figure:
     """Genera una figura Plotly base con el tema oscuro corporativo."""
     fig = go.Figure()
     fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f",
         font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
         xaxis=dict(gridcolor="#1e2535", linecolor="#2a3040"),
         yaxis=dict(gridcolor="#1e2535", linecolor="#2a3040"),
-        hovermode="x unified",
-        height=300,
-        margin=dict(l=55, r=20, t=40, b=50),
+        hovermode="x unified", height=300, margin=dict(l=55, r=20, t=40, b=50),
         title=dict(text=title, font=dict(color="#c8bfae", size=12), x=0),
     )
     return fig
@@ -81,16 +76,9 @@ def get_tilt_optimo(lat, lon, altura):
     return calcular_tilt_optimo(lat, lon, altura)
 
 
-@st.cache_data(show_spinner=False)
-def get_clima_open_meteo_cached(lat, lon, start_date, end_date, timezone="America/Mexico_City"):
-    """Cachea solo la descarga climática; no depende de tilt, acimut ni panel."""
-    return descargar_clima_open_meteo(lat, lon, start_date, end_date, timezone)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURACIÓN STREAMLIT & UI
+#  CONFIGURACIÓN STREAMLIT & ESTILOS
 # ─────────────────────────────────────────────────────────────────────────────
-
 st.set_page_config(
     page_title="Análisis Fotovoltaico",
     page_icon="☀️",
@@ -98,29 +86,142 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
+st.markdown("""
 <style>
- @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
- html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
- .stApp { background-color: #0f1117; color: #e8e0d0; }
- [data-testid="stSidebar"] { background-color: #161b27; border-right: 1px solid #2a3040; }
- h1 { font-family: 'IBM Plex Mono', monospace !important; color: #f5a623 !important; font-size: 1.8rem !important; }
- h3 { font-family: 'IBM Plex Mono', monospace !important; color: #c8bfae !important; font-size: 0.85rem !important; text-transform: uppercase; border-bottom: 1px solid #2a3040; padding-bottom: 6px; }
- [data-testid="metric-container"] { background-color: #161b27; border: 1px solid #2a3040; border-radius: 8px; padding: 18px 20px; }
- [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #f5a623 !important; font-family: 'IBM Plex Mono', monospace; }
- div[data-testid="stButton"] > button { background: linear-gradient(135deg, #f5a623, #e8860d); color: #0f1117; font-weight: 600; }
- .panel-card { background: #1a2235; border: 1px solid #2a3a50; border-left: 3px solid #f5a623; border-radius: 8px; padding: 14px 16px; margin-top: 8px; }
- .pc-tipo { color: #f5a623; font-weight: 600; font-size: 0.70rem; text-transform: uppercase; }
- .pc-modelo { color: #e8e0d0; font-size: 0.85rem; font-weight: 600; }
- .pc-tag { display: inline-block; background: #0f1117; border: 1px solid #2a3a50; border-radius: 4px; padding: 3px 10px; font-size: 0.72rem; color: #4ecdc4; }
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+    html, body, [class*="css"]  { font-family: 'IBM Plex Sans', sans-serif; }
+    .stApp { background-color: #0f1117; color: #e8e0d0; }
+    [data-testid="stSidebar"] { background-color: #161b27; border-right: 1px solid #2a3040; }
+    h1 { font-family: 'IBM Plex Mono', monospace !important; color: #f5a623 !important; font-size: 1.8rem !important; }
+    h3 { font-family: 'IBM Plex Mono', monospace !important; color: #c8bfae !important; font-size: 0.85rem !important; text-transform: uppercase; border-bottom: 1px solid #2a3040; padding-bottom: 6px; }
+    [data-testid="metric-container"] { background-color: #161b27; border: 1px solid #2a3040; border-radius: 8px; padding: 18px 20px; }
+    [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #f5a623 !important; font-family: 'IBM Plex Mono', monospace; }
+    div[data-testid="stButton"] > button { background: linear-gradient(135deg, #f5a623, #e8860d); color: #0f1117; font-weight: 600; }
+    .panel-card { background: #1a2235; border: 1px solid #2a3a50; border-left: 3px solid #f5a623; border-radius: 8px; padding: 14px 16px; margin-top: 8px; }
+    .pc-tipo { color: #f5a623; font-weight: 600; font-size: 0.70rem; text-transform: uppercase; }
+    .pc-modelo { color: #e8e0d0; font-size: 0.85rem; font-weight: 600; }
+    .pc-tag { display: inline-block; background: #0f1117; border: 1px solid #2a3a50; border-radius: 4px; padding: 3px 10px; font-size: 0.72rem; color: #4ecdc4; }
+
+    /* ── BESS-specific styles ── */
+    .bess-card {
+        background: #1a2235;
+        border: 1px solid #2a3a50;
+        border-left: 3px solid #4ecdc4;
+        border-radius: 8px;
+        padding: 16px 18px;
+        margin-top: 8px;
+        font-family: 'IBM Plex Mono', monospace;
+    }
+    .bess-card-label {
+        color: #4ecdc4;
+        font-weight: 600;
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 10px;
+    }
+    .bess-card-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        border-bottom: 1px solid #1e2535;
+        padding: 5px 0;
+        font-size: 0.78rem;
+    }
+    .bess-card-row:last-child { border-bottom: none; }
+    .bess-card-key { color: #8892a4; }
+    .bess-card-val { color: #e8e0d0; font-weight: 600; }
+
+    .riesgo-card {
+        border-radius: 8px;
+        padding: 16px 18px;
+        margin-top: 8px;
+        font-family: 'IBM Plex Mono', monospace;
+    }
+    .riesgo-alto   { background: rgba(231,76,60,0.12);  border: 1px solid rgba(231,76,60,0.35);  border-left: 3px solid #e74c3c; }
+    .riesgo-medio  { background: rgba(245,166,35,0.10); border: 1px solid rgba(245,166,35,0.30); border-left: 3px solid #f5a623; }
+    .riesgo-bajo   { background: rgba(78,205,196,0.10); border: 1px solid rgba(78,205,196,0.30); border-left: 3px solid #4ecdc4; }
+    .riesgo-badge {
+        display: inline-block;
+        border-radius: 4px;
+        padding: 4px 12px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 10px;
+    }
+    .badge-alto  { background: rgba(231,76,60,0.25);  color: #ff6b6b; }
+    .badge-medio { background: rgba(245,166,35,0.25); color: #f5a623; }
+    .badge-bajo  { background: rgba(78,205,196,0.25); color: #4ecdc4; }
+    .riesgo-justif {
+        color: #8892a4;
+        font-size: 0.75rem;
+        line-height: 1.55;
+        margin-top: 8px;
+        font-family: 'IBM Plex Sans', sans-serif;
+    }
+    .riesgo-autonomia-label { color: #c8bfae; font-size: 0.70rem; text-transform: uppercase; margin-top: 10px; }
+    .riesgo-autonomia-val   { font-size: 1.4rem; font-weight: 700; margin-top: 2px; }
+    .autonomia-alto  { color: #ff6b6b; }
+    .autonomia-medio { color: #f5a623; }
+    .autonomia-bajo  { color: #4ecdc4; }
+
+    .impacto-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.78rem;
+        margin-top: 8px;
+    }
+    .impacto-table th {
+        color: #8892a4;
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 0.65rem;
+        letter-spacing: 0.06em;
+        padding: 8px 12px;
+        border-bottom: 1px solid #2a3040;
+        text-align: left;
+    }
+    .impacto-table td {
+        padding: 9px 12px;
+        border-bottom: 1px solid #1e2535;
+        color: #c8bfae;
+        vertical-align: middle;
+    }
+    .impacto-table tr:last-child td { border-bottom: none; }
+    .impacto-table tr:hover td { background: rgba(255,255,255,0.025); }
+    .cat-badge {
+        display: inline-block;
+        border-radius: 3px;
+        padding: 2px 8px;
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+    }
+    .cat-largo  { background: rgba(231,76,60,0.20);  color: #ff6b6b; }
+    .cat-medio  { background: rgba(245,166,35,0.20); color: #f5a623; }
+    .cat-corto  { background: rgba(78,205,196,0.20); color: #4ecdc4; }
+    .impacto-section-wrap {
+        background: #161b27;
+        border: 1px solid #2a3040;
+        border-radius: 8px;
+        padding: 16px 18px;
+        margin-top: 8px;
+    }
+    .impacto-section-label {
+        color: #c8bfae;
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.70rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 10px;
+    }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 st.markdown("# ☀️ Análisis de Viabilidad Energética Fotovoltaica")
-
 
 # ── BARRA LATERAL ────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -129,26 +230,22 @@ with st.sidebar:
     lat_def, lon_def, alt_def = ESTADOS_MEXICO[estado_sel]
 
     col1, col2 = st.columns(2)
-    latitud = col1.number_input("Latitud (°)", value=lat_def if lat_def else 25.6866, format="%.4f")
-    longitud = col2.number_input("Longitud (°)", value=lon_def if lon_def else -100.3161, format="%.4f")
-    altura = st.number_input("Altitud (msnm)", value=alt_def if alt_def else 540.0, format="%.0f")
+    latitud   = col1.number_input("Latitud (°)",   value=lat_def if lat_def else 25.6866, format="%.4f")
+    longitud  = col2.number_input("Longitud (°)",  value=lon_def if lon_def else -100.3161, format="%.4f")
+    altura    = st.number_input("Altitud (msnm)",  value=alt_def if alt_def else 540.0, format="%.0f")
 
     st.markdown("### 2. Orientación del Arreglo")
     tilt_opt = get_tilt_optimo(latitud, longitud, altura)
-    st.info(f"Ángulo óptimo calculado: **{tilt_opt:.1f}°**")
+    st.info(f"📐 Ángulo óptimo calculado: **{tilt_opt:.1f}°**")
 
     c_tilt, c_az = st.columns(2)
-    tilt = c_tilt.number_input("Inclinación (°)", value=float(tilt_opt), step=1.0)
-    acimut = c_az.number_input(
-        "Acimut (°)",
-        value=0.0,
-        help="0° = Sur, 90° = Oeste, -90° = Este",
-        step=5.0,
-    )
+    tilt   = c_tilt.number_input("Inclinación (°)", value=float(tilt_opt), step=1.0)
+    acimut = c_az.number_input("Acimut (°)", value=0.0,
+                                help="0° = Sur, 90° = Oeste, -90° = Este", step=5.0)
 
     st.markdown("### 3. Perfil de Consumo")
     tipo_demanda = st.radio("Formato de entrada", ["Anual", "Mensual"], horizontal=True)
-    kwh_anual = 0.0
+    kwh_anual    = 0.0
     kwh_mensuales = [0.0] * 12
 
     if tipo_demanda == "Anual":
@@ -166,9 +263,11 @@ with st.sidebar:
     )
     p = PANELES[tipo_panel]
     st.markdown(
-        f"<div class='panel-card'><div class='pc-tipo'>{p['nombre']}</div>"
+        f"<div class='panel-card'>"
+        f"<div class='pc-tipo'>{p['nombre']}</div>"
         f"<div class='pc-modelo'>{p['modelo']}</div>"
-        f"<span class='pc-tag'>{p['potencia_w']} W</span></div>",
+        f"<span class='pc-tag'>{p['potencia_w']} W</span>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -176,379 +275,424 @@ with st.sidebar:
     if p["bifacial"]:
         gb = st.slider("Beneficio Bifacial (%)", 5, 25, 15) / 100.0
 
-    st.markdown("### 5. Clima histórico")
-    usar_clima_historico = st.checkbox("Usar clima histórico Open-Meteo", value=True)
-    col_w1, col_w2 = st.columns(2)
-    weather_start_date = col_w1.date_input("Inicio", value=date(2025, 1, 1))
-    weather_end_date = col_w2.date_input("Fin", value=date(2025, 12, 31))
+    # ── SECCIÓN 5: ALMACENAMIENTO (BESS) ─────────────────────────────────────
+    st.markdown("### 5. Almacenamiento de Energía (BESS)")
 
-    if usar_clima_historico:
-        st.caption(
-            "Se usa como año climático análogo para estimar temperatura de celda "
-            "y penalización térmica."
+    b1, b2 = st.columns(2)
+    carga_critica_kw = b1.number_input(
+        "Carga Crítica (kW)",
+        value=300.0,
+        step=25.0,
+        help="Potencia de la carga industrial crítica a proteger con el BESS.",
+    )
+    horas_respaldo = b2.number_input(
+        "Autonomía (horas)",
+        value=4.0,
+        step=0.5,
+        min_value=0.5,
+        help="Horas de respaldo energético requeridas ante un apagón.",
+    )
+
+    with st.expander("⚡ Configuración de Apagones (Historial CFE)"):
+        frecuencia_largos = st.number_input(
+            "Apagones Largos  (>1 hr / año)",
+            value=3,
+            step=1,
+            min_value=0,
+            help="Número de apagones de más de 1 hora por año según historial.",
         )
-    else:
-        st.warning(
-            "Modo simplificado: se usará temperatura ambiente fija de 20 °C y viento fijo de 1.5 m/s."
+        frecuencia_medios = st.number_input(
+            "Apagones Medios  (1–10 min / año)",
+            value=12,
+            step=1,
+            min_value=0,
+        )
+        frecuencia_cortos = st.number_input(
+            "Microapagones     (<1 min / año)",
+            value=24,
+            step=1,
+            min_value=0,
         )
 
     st.markdown("---")
     boton_ejecutar = st.button("▶ Ejecutar Simulación", use_container_width=True)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# EJECUCIÓN
+#  EJECUCIÓN
 # ─────────────────────────────────────────────────────────────────────────────
-
 if boton_ejecutar:
-    with st.spinner("Ejecutando cálculo de irradiancia POA y penalización térmica..."):
+    with st.spinner("Ejecutando motor termodinámico, irradiancia POA y cálculo BESS..."):
         try:
-            if weather_end_date < weather_start_date:
-                raise ValueError("La fecha final del clima histórico no puede ser anterior a la fecha inicial.")
-
-            df_clima_horario = None
-            if usar_clima_historico:
-                df_clima_horario = get_clima_open_meteo_cached(
-                    latitud,
-                    longitud,
-                    weather_start_date.isoformat(),
-                    weather_end_date.isoformat(),
-                    "America/Mexico_City",
-                )
-
+            # ── Motor solar ──────────────────────────────────────────────────
             df_motor, energia_anual = calcular_viabilidad(
-                latitud,
-                longitud,
-                altura,
-                tipo_demanda,
-                kwh_mensuales,
-                kwh_anual,
-                tilt,
-                acimut,
-                tipo_panel,
-                gb,
-                usar_clima_historico=usar_clima_historico,
-                weather_start_date=weather_start_date.isoformat(),
-                weather_end_date=weather_end_date.isoformat(),
-                df_clima_horario=df_clima_horario,
+                latitud, longitud, altura,
+                tipo_demanda, kwh_mensuales, kwh_anual,
+                tilt, acimut, tipo_panel, gb,
             )
-            df_temp_mensual = resumen_penalizacion_temperatura_mensual(df_motor)
 
-            st.session_state.update(
-                {
-                    "df_motor": df_motor,
-                    "energia_anual": energia_anual,
-                    "df_temp_mensual": df_temp_mensual,
-                    "usar_clima_historico": usar_clima_historico,
-                    "sim_ok": True,
-                }
+            # ── Motor BESS ───────────────────────────────────────────────────
+            motor_bess       = MotorBESS()
+            res_dim          = motor_bess.calcular_dimensionamiento(
+                horas_respaldo=horas_respaldo,
+                carga_critica_kw=carga_critica_kw,
             )
+            res_cortes        = motor_bess.analizar_historico_cortes(
+                frecuencia_largos=int(frecuencia_largos),
+                frecuencia_medios=int(frecuencia_medios),
+                frecuencia_cortos=int(frecuencia_cortos),
+            )
+
+            st.session_state.update({
+                "df_motor":    df_motor,
+                "energia_anual": energia_anual,
+                "res_dim":     res_dim,
+                "res_cortes":  res_cortes,
+                "bess_specs":  motor_bess.specs,
+                "sim_ok":      True,
+            })
+
         except Exception as e:
-            st.session_state["sim_ok"] = False
             st.error(f"Error en el motor de cálculo: {e}")
             st.code(traceback.format_exc(), language="python")
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# RESULTADOS
+#  RESULTADOS — organizado en dos pestañas
 # ─────────────────────────────────────────────────────────────────────────────
-
 if st.session_state.get("sim_ok"):
-    df_motor = st.session_state["df_motor"].copy()
-    df_temp_mensual = st.session_state["df_temp_mensual"].copy()
+    df_motor      = st.session_state["df_motor"]
+    res_dim       = st.session_state["res_dim"]
+    res_cortes    = st.session_state["res_cortes"]
+    bess_specs    = st.session_state["bess_specs"]
 
-    dem_orig_kwh = float(df_motor["Demanda_kW"].sum() * 0.25)
-    dem_post_kwh = float(df_motor["Demanda_Post_Inyeccion_Solar_kW"].sum() * 0.25)
-    ahorro_kwh = dem_orig_kwh - dem_post_kwh
+    tab_solar, tab_bess = st.tabs(["☀️ Análisis Solar", "🔋 Almacenamiento y Resiliencia (BESS)"])
 
-    perdida_anual_temp = float(df_motor["Perdida_Temperatura_kWh"].sum())
-    gen_sin_temp_anual = float(df_motor["Energia_Solar_Sin_Temp_kWh"].sum())
-    penalizacion_anual_pct = perdida_anual_temp / gen_sin_temp_anual * 100.0 if gen_sin_temp_anual > 0 else 0.0
-    temp_celda_prom = float(df_motor["Temperatura_Celda_C"].mean())
-    temp_celda_max = float(df_motor["Temperatura_Celda_C"].max())
+    # =========================================================================
+    #  TAB 1 — ANÁLISIS SOLAR (código original sin modificaciones)
+    # =========================================================================
+    with tab_solar:
+        # ── MÉTRICAS SUPERIORES ──────────────────────────────────────────────
+        dem_orig_kwh  = float(df_motor["Demanda_kW"].sum() * 0.25)
+        dem_post_kwh  = float(df_motor["Demanda_Post_Inyeccion_Solar_kW"].sum() * 0.25)
+        ahorro_kwh    = dem_orig_kwh - dem_post_kwh
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Consumo Anual Original", f"{dem_orig_kwh:,.0f} kWh")
-    m2.metric("Generación Solar Anual", f"{st.session_state['energia_anual']:,.0f} kWh")
-    m3.metric(
-        "Consumo Anual Residual",
-        f"{dem_post_kwh:,.0f} kWh",
-        delta=f"{-ahorro_kwh / dem_orig_kwh * 100:.1f}%" if dem_orig_kwh > 0 else "0.0%",
-        delta_color="inverse",
-    )
-
-    mt1, mt2, mt3, mt4 = st.columns(4)
-    mt1.metric("Pérdida anual por temperatura", f"{perdida_anual_temp:,.0f} kWh")
-    mt2.metric("Penalización térmica anual (%)", f"{penalizacion_anual_pct:.2f}%")
-    mt3.metric("Temperatura celda promedio", f"{temp_celda_prom:.1f} °C")
-    mt4.metric("Temperatura celda máxima", f"{temp_celda_max:.1f} °C")
-
-    if not st.session_state.get("usar_clima_historico", True):
-        st.info("Resultados térmicos calculados con supuesto simplificado: 20 °C ambiente y 1.5 m/s de viento.")
-
-    st.markdown("---")
-
-    # ── GRÁFICO 1: BALANCE MENSUAL DE ENERGÍA ───────────────────────────────
-    st.markdown("### Balance Energético Mensual (kWh)")
-    df_motor["Mes"] = df_motor["Fecha_Hora"].dt.month
-    df_mes = df_motor.groupby("Mes")[["Demanda_kW", "Generacion_Solar_kW", "Demanda_Post_Inyeccion_Solar_kW"]].sum() * 0.25
-    df_mes = df_mes.reindex(range(1, 13)).fillna(0.0)
-
-    fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Demanda_kW"], name="Consumo Total", marker_color="#ff6b6b"))
-    fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Generacion_Solar_kW"], name="Generación Solar", marker_color="#f5a623"))
-    fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Demanda_Post_Inyeccion_Solar_kW"], name="Consumo Residual (Red)", marker_color="#4ecdc4"))
-    fig_bar.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
-        barmode="group",
-        font=dict(family="IBM Plex Mono", color="#8892a4"),
-        height=350,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    st.markdown("---")
-
-    # ── NUEVA SECCIÓN: PENALIZACIÓN POR TEMPERATURA MENSUAL ─────────────────
-    st.markdown("### Penalización por Temperatura Mensual")
-    df_temp_plot = df_temp_mensual.copy()
-    df_temp_plot["Mes_Str"] = df_temp_plot["Mes"].map(lambda m: MESES_STR[int(m) - 1])
-
-    fig_temp_bar = go.Figure()
-    fig_temp_bar.add_trace(
-        go.Bar(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Generacion_Sin_Temp_kWh"],
-            name="Generación sin temp. (25 °C)",
-            marker_color="#4ecdc4",
-        )
-    )
-    fig_temp_bar.add_trace(
-        go.Bar(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Generacion_Con_Temp_kWh"],
-            name="Generación con temp.",
-            marker_color="#f5a623",
-        )
-    )
-    fig_temp_bar.add_trace(
-        go.Bar(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Perdida_Temperatura_kWh"],
-            name="Pérdida térmica",
-            marker_color="#ff6b6b",
-        )
-    )
-    fig_temp_bar.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
-        barmode="group",
-        font=dict(family="IBM Plex Mono", color="#8892a4"),
-        height=360,
-        yaxis_title="kWh/mes",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig_temp_bar, use_container_width=True)
-
-    fig_temp_pct = _make_fig("Penalización térmica mensual (%)")
-    fig_temp_pct.add_trace(
-        go.Scatter(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Penalizacion_Temperatura_pct"],
-            name="Penalización térmica",
-            mode="lines+markers",
-            line=dict(color="#ffe033", width=2),
-            marker=dict(size=7),
-        )
-    )
-    fig_temp_pct.update_layout(yaxis_title="%", height=300)
-    st.plotly_chart(fig_temp_pct, use_container_width=True)
-
-    # ── Temperaturas mensuales en un solo eje vertical ────────────────────────
-    fig_temp_un_eje = _make_fig("Temperatura ambiente y temperatura de celda mensual")
-
-    fig_temp_un_eje.add_trace(
-        go.Scatter(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Temperatura_Ambiente_Prom_C"],
-            name="Temp. ambiente prom.",
-            mode="lines+markers",
-            line=dict(color="#4ecdc4", width=2),
-            marker=dict(size=7),
-            hovertemplate="<b>%{x}</b><br>Temp. ambiente prom.: %{y:.2f} °C<extra></extra>",
-        )
-    )
-
-    fig_temp_un_eje.add_trace(
-        go.Scatter(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Temperatura_Celda_Prom_C"],
-            name="Temp. celda prom.",
-            mode="lines+markers",
-            line=dict(color="#f5a623", width=2),
-            marker=dict(size=7),
-            hovertemplate="<b>%{x}</b><br>Temp. celda prom.: %{y:.2f} °C<extra></extra>",
-        )
-    )
-
-    fig_temp_un_eje.add_trace(
-        go.Scatter(
-            x=df_temp_plot["Mes_Str"],
-            y=df_temp_plot["Temperatura_Celda_Max_C"],
-            name="Temp. celda máx.",
-            mode="lines+markers",
-            line=dict(color="#ff6b6b", width=2, dash="dash"),
-            marker=dict(size=7),
-            hovertemplate="<b>%{x}</b><br>Temp. celda máx.: %{y:.2f} °C<extra></extra>",
-        )
-    )
-
-    fig_temp_un_eje.update_layout(
-        yaxis_title="Temperatura (°C)",
-        height=320,
-        hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-        ),
-    )
-
-    fig_temp_un_eje.update_yaxes(
-        title_text="Temperatura (°C)",
-        gridcolor="#1e2535",
-    )
-
-    st.plotly_chart(fig_temp_un_eje, use_container_width=True)
-
-    st.dataframe(df_temp_mensual, use_container_width=True)
-    st.download_button(
-        label="⬇ Descargar resumen mensual de temperatura (CSV)",
-        data=df_temp_mensual.to_csv(index=False).encode("utf-8-sig"),
-        file_name="resumen_penalizacion_temperatura_mensual.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    st.markdown("---")
-
-    # ── FILTRO TEMPORAL PARA SERIES DE TIEMPO ────────────────────────────────
-    st.markdown("### Análisis Dinámico en Alta Resolución (15 min)")
-    fecha_min = df_motor["Fecha_Hora"].min().date()
-    fecha_max = df_motor["Fecha_Hora"].max().date()
-
-    col_fi, col_ff = st.columns(2)
-    with col_fi:
-        fecha_inicio = st.date_input("Desde", value=fecha_min, min_value=fecha_min, max_value=fecha_max)
-    with col_ff:
-        fecha_fin = st.date_input(
-            "Hasta",
-            value=min(fecha_min + timedelta(days=6), fecha_max),
-            min_value=fecha_min,
-            max_value=fecha_max,
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Consumo Anual Original", f"{dem_orig_kwh:,.0f} kWh")
+        m2.metric("Generación Solar Anual", f"{st.session_state['energia_anual']:,.0f} kWh")
+        m3.metric(
+            "Consumo Anual Residual",
+            f"{dem_post_kwh:,.0f} kWh",
+            delta=f"{-ahorro_kwh / dem_orig_kwh * 100:.1f}%",
+            delta_color="inverse",
         )
 
-    df_vis = _filtrar_rango(df_motor, fecha_inicio, fecha_fin)
+        st.markdown("---")
 
-    # ── GRÁFICO 2: DEMANDA VS IRRADIANCIA ───────────────────────────────────
-    fig1 = make_subplots(specs=[[{"secondary_y": True}]])
-    fig1.add_trace(
-        go.Scatter(
-            x=df_vis["Fecha_Hora"],
-            y=df_vis["Demanda_kW"],
-            name="Demanda (kW)",
-            mode="lines",
-            line=dict(color="#ff6b6b", width=1.8),
-        ),
-        secondary_y=False,
-    )
-    fig1.add_trace(
-        go.Scatter(
-            x=df_vis["Fecha_Hora"],
-            y=df_vis["Gtot_POA_Wm2"],
-            name="Gtot POA (W/m²)",
-            mode="lines",
-            line=dict(color="#f5a623", width=1.5),
-        ),
-        secondary_y=True,
-    )
-    fig1.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
-        font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
-        hovermode="x unified",
-        height=320,
-        margin=dict(l=60, r=60, t=40, b=30),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    fig1.update_yaxes(title_text="Demanda (kW)", title_font=dict(color="#ff6b6b"), tickfont=dict(color="#ff6b6b"), gridcolor="#1e2535", secondary_y=False)
-    fig1.update_yaxes(title_text="Irradiancia POA (W/m²)", title_font=dict(color="#f5a623"), tickfont=dict(color="#f5a623"), showgrid=False, secondary_y=True)
-    st.plotly_chart(fig1, use_container_width=True)
+        # ── GRÁFICO 1: BALANCE MENSUAL DE ENERGÍA (BARRAS) ───────────────────
+        st.markdown("### Balance Energético Mensual (kWh)")
+        df_motor["Mes"] = df_motor["Fecha_Hora"].dt.month
+        df_mes = (
+            df_motor.groupby("Mes")[
+                ["Demanda_kW", "Generacion_Solar_kW", "Demanda_Post_Inyeccion_Solar_kW"]
+            ].sum()
+            * 0.25
+        )
 
-    # ── GRÁFICO 3: GENERACIÓN SOLAR ─────────────────────────────────────────
-    fig2 = _make_fig()
-    fig2.add_trace(
-        go.Scatter(
-            x=df_vis["Fecha_Hora"],
-            y=df_vis["Generacion_Solar_kW"],
-            name="Generación Solar",
-            mode="lines",
-            fill="tozeroy",
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Demanda_kW"],
+                                  name="Consumo Total", marker_color="#ff6b6b"))
+        fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Generacion_Solar_kW"],
+                                  name="Generación Solar", marker_color="#f5a623"))
+        fig_bar.add_trace(go.Bar(x=MESES_STR, y=df_mes["Demanda_Post_Inyeccion_Solar_kW"],
+                                  name="Consumo Residual (Red)", marker_color="#4ecdc4"))
+        fig_bar.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f", barmode="group",
+            font=dict(family="IBM Plex Mono", color="#8892a4"), height=350,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── FILTRO TEMPORAL ──────────────────────────────────────────────────
+        st.markdown("### Análisis Dinámico en Alta Resolución (15 min)")
+        fecha_min = df_motor["Fecha_Hora"].min().date()
+        fecha_max = df_motor["Fecha_Hora"].max().date()
+
+        col_fi, col_ff = st.columns(2)
+        with col_fi:
+            fecha_inicio = st.date_input("Desde", value=fecha_min,
+                                          min_value=fecha_min, max_value=fecha_max)
+        with col_ff:
+            fecha_fin = st.date_input(
+                "Hasta",
+                value=min(fecha_min + timedelta(days=6), fecha_max),
+                min_value=fecha_min, max_value=fecha_max,
+            )
+
+        df_vis = _filtrar_rango(df_motor, fecha_inicio, fecha_fin)
+
+        # ── GRÁFICO 2: DEMANDA VS IRRADIANCIA (DOBLE EJE Y) ──────────────────
+        fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+        fig1.add_trace(
+            go.Scatter(x=df_vis["Fecha_Hora"], y=df_vis["Demanda_kW"],
+                       name="Demanda (kW)", mode="lines",
+                       line=dict(color="#ff6b6b", width=1.8)),
+            secondary_y=False,
+        )
+        fig1.add_trace(
+            go.Scatter(x=df_vis["Fecha_Hora"], y=df_vis["Gtot_POA_Wm2"],
+                       name="Gtot POA (W/m²)", mode="lines",
+                       line=dict(color="#f5a623", width=1.5)),
+            secondary_y=True,
+        )
+        fig1.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f",
+            font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+            hovermode="x unified", height=320,
+            margin=dict(l=60, r=60, t=40, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        fig1.update_yaxes(
+            title_text="Demanda (kW)",
+            title_font=dict(color="#ff6b6b"), tickfont=dict(color="#ff6b6b"),
+            gridcolor="#1e2535", secondary_y=False,
+        )
+        fig1.update_yaxes(
+            title_text="Irradiancia POA (W/m²)",
+            title_font=dict(color="#f5a623"), tickfont=dict(color="#f5a623"),
+            showgrid=False, secondary_y=True,
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+        # ── GRÁFICO 3: GENERACIÓN SOLAR (kW) ─────────────────────────────────
+        fig2 = _make_fig()
+        fig2.add_trace(go.Scatter(
+            x=df_vis["Fecha_Hora"], y=df_vis["Generacion_Solar_kW"],
+            name="Generación Solar", mode="lines", fill="tozeroy",
             line=dict(color="#ffe033", width=1.5),
             fillcolor="rgba(255,224,51,0.12)",
-        )
-    )
-    fig2.update_layout(yaxis_title="kW", xaxis_title="", height=280, margin=dict(t=20, b=20))
-    st.plotly_chart(fig2, use_container_width=True)
+        ))
+        fig2.update_layout(yaxis_title="kW", xaxis_title="", height=280, margin=dict(t=20, b=20))
+        st.plotly_chart(fig2, use_container_width=True)
 
-    st.markdown("---")
+        st.markdown("---")
 
-    # ── GRÁFICO 4: MATRIZ DE IRRADIANCIA POA ────────────────────────────────
-    st.markdown("### Matriz de Irradiancia POA Anual (W/m²)")
-    _z, _y_lbl, _x_lbl = _matriz_irradiancia(df_motor)
-    _custom = np.array([[_y_lbl[r] for _ in range(12)] for r in range(96)])
+        # ── GRÁFICO 4: MATRIZ DE IRRADIANCIA POA ─────────────────────────────
+        st.markdown("### Matriz de Irradiancia POA Anual (W/m²)")
+        _z, _y_lbl, _x_lbl = _matriz_irradiancia(df_motor)
+        _custom = np.array([[_y_lbl[r] for _ in range(12)] for r in range(96)])
 
-    escala_inferno_negro = [
-        [0.00, "#12171f"],
-        [0.11, "#1b0c41"],
-        [0.22, "#4a0c6b"],
-        [0.33, "#781c6d"],
-        [0.44, "#a52c60"],
-        [0.55, "#cf4446"],
-        [0.66, "#ed6925"],
-        [0.77, "#fb9b06"],
-        [0.88, "#f7d13d"],
-        [1.00, "#fcffa4"],
-    ]
+        escala_inferno_negro = [
+            [0.00, "#12171f"], [0.11, "#1b0c41"], [0.22, "#4a0c6b"], [0.33, "#781c6d"],
+            [0.44, "#a52c60"], [0.55, "#cf4446"], [0.66, "#ed6925"], [0.77, "#fb9b06"],
+            [0.88, "#f7d13d"], [1.00, "#fcffa4"],
+        ]
 
-    fig_hm = go.Figure(
-        go.Heatmap(
-            z=_z,
-            x=_x_lbl,
-            y=list(range(96)),
-            colorscale=escala_inferno_negro,
-            zmin=0,
-            zmax=np.max(_z),
+        fig_hm = go.Figure(go.Heatmap(
+            z=_z, x=_x_lbl, y=list(range(96)),
+            colorscale=escala_inferno_negro, zmin=0, zmax=np.max(_z),
             customdata=_custom,
-            hovertemplate="Mes: <b>%{x}</b><br>Hora: <b>%{customdata}</b><br>Irradiancia: <b>%{z:.1f} W/m²</b><extra></extra>",
+            hovertemplate=(
+                "Mes: <b>%{x}</b><br>"
+                "Hora: <b>%{customdata}</b><br>"
+                "Irradiancia: <b>%{z:.1f} W/m²</b><extra></extra>"
+            ),
+        ))
+        _tick_slots = list(range(0, 96, 8))
+        fig_hm.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f",
+            font=dict(family="IBM Plex Mono", color="#8892a4"),
+            xaxis=dict(side="bottom", linecolor="#2a3040"),
+            yaxis=dict(
+                autorange="reversed",
+                tickvals=_tick_slots,
+                ticktext=[_y_lbl[i] for i in _tick_slots],
+                gridcolor="#1e2535",
+            ),
+            height=500, margin=dict(l=60, r=20, t=20, b=30),
         )
-    )
-    _tick_slots = list(range(0, 96, 8))
-    fig_hm.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#12171f",
-        font=dict(family="IBM Plex Mono", color="#8892a4"),
-        xaxis=dict(side="bottom", linecolor="#2a3040"),
-        yaxis=dict(
-            autorange="reversed",
-            tickvals=_tick_slots,
-            ticktext=[_y_lbl[i] for i in _tick_slots],
-            gridcolor="#1e2535",
-        ),
-        height=500,
-        margin=dict(l=60, r=20, t=20, b=30),
-    )
-    st.plotly_chart(fig_hm, use_container_width=True)
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+    # =========================================================================
+    #  TAB 2 — BESS
+    # =========================================================================
+    with tab_bess:
+
+        # ── FILA 1: MÉTRICAS DE DIMENSIONAMIENTO ─────────────────────────────
+        st.markdown("### Dimensionamiento del Arreglo BESS")
+        mb1, mb2, mb3 = st.columns(3)
+
+        mb1.metric(
+            "Gabinetes Requeridos",
+            f"{res_dim.unidades_bess} unidades",
+            help="Gabinetes Sungrow PowerStack 255CS en paralelo.",
+        )
+        mb2.metric(
+            "Capacidad Total Instalada",
+            f"{res_dim.capacidad_total_kwh:,.0f} kWh",
+            delta=f"+{res_dim.sobredimensionamiento_pct:.1f}% sobre requerido",
+            delta_color="off",
+        )
+        mb3.metric(
+            "Potencia AC del Arreglo",
+            f"{res_dim.potencia_total_kw:,.0f} kW",
+            help="Potencia AC nominal total del arreglo de gabinetes.",
+        )
+
+        st.markdown("---")
+
+        # ── FILA 2: FICHA TÉCNICA & RIESGO ───────────────────────────────────
+        st.markdown("### Equipo de Referencia y Evaluación de Riesgo")
+        col_ficha, col_riesgo = st.columns(2, gap="medium")
+
+        with col_ficha:
+            # Ficha técnica del gabinete
+            st.markdown(
+                f"""
+                <div class="bess-card">
+                    <div class="bess-card-label">Ficha Técnica del Gabinete</div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">Modelo</span>
+                        <span class="bess-card-val">{bess_specs.modelo}</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">Química</span>
+                        <span class="bess-card-val">{bess_specs.quimica}</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">Capacidad nominal</span>
+                        <span class="bess-card-val">{bess_specs.capacidad_nominal_kwh:.0f} kWh / gabinete</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">Potencia nominal AC</span>
+                        <span class="bess-card-val">{bess_specs.potencia_nominal_ac_kw:.0f} kW / gabinete</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">RTE (Round-Trip Efficiency)</span>
+                        <span class="bess-card-val">{bess_specs.rte * 100:.0f} %</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">Ciclos garantizados</span>
+                        <span class="bess-card-val">{bess_specs.ciclos_minimos:,} – {bess_specs.ciclos_maximos:,}</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">Vida útil estimada</span>
+                        <span class="bess-card-val">{bess_specs.vida_util_anos_min} – {bess_specs.vida_util_anos_max} años</span>
+                    </div>
+                    <div class="bess-card-row">
+                        <span class="bess-card-key">kWh requeridos (incl. RTE)</span>
+                        <span class="bess-card-val">{res_dim.capacidad_requerida_kwh:,.2f} kWh</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col_riesgo:
+            nivel = res_cortes.nivel_riesgo      # "Bajo" | "Medio" | "Alto"
+            nivel_lower = nivel.lower()
+
+            riesgo_color_map = {
+                "alto":  ("#ff6b6b", "badge-alto",  "riesgo-alto",  "autonomia-alto"),
+                "medio": ("#f5a623", "badge-medio", "riesgo-medio", "autonomia-medio"),
+                "bajo":  ("#4ecdc4", "badge-bajo",  "riesgo-bajo",  "autonomia-bajo"),
+            }
+            _, badge_cls, card_cls, auto_cls = riesgo_color_map[nivel_lower]
+
+            st.markdown(
+                f"""
+                <div class="riesgo-card {card_cls}">
+                    <span class="riesgo-badge {badge_cls}">
+                        Riesgo Operativo — {nivel.upper()}
+                    </span>
+                    <div class="riesgo-autonomia-label">Autonomía Mínima Recomendada</div>
+                    <div class="riesgo-autonomia-val {auto_cls}">
+                        {res_cortes.autonomia_recomendada_hrs:.0f} horas
+                    </div>
+                    <div class="riesgo-justif">{res_cortes.justificacion_riesgo}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+        # ── FILA 3: DESGLOSE DE IMPACTO POR CATEGORÍA DE CORTE ───────────────
+        st.markdown("### Desglose del Impacto Anual por Cortes de Energía")
+
+        impacto = res_cortes.impacto_anual_estimado
+        cat_config = {
+            "largos": ("LARGOS  > 1 hr",  "cat-largo"),
+            "medios": ("MEDIOS  1–10 min", "cat-medio"),
+            "cortos": ("CORTOS  < 1 min",  "cat-corto"),
+        }
+
+        # Build table HTML
+        rows_html = ""
+        total_eventos  = 0
+        total_horas    = 0.0
+
+        for key, (label_txt, badge_cls) in cat_config.items():
+            d          = impacto[key]
+            eventos    = d["eventos"]
+            dur_repr   = d["duracion_representativa_hrs"]
+            horas_acum = d["horas_desabasto_acumuladas"]
+            desc       = d["descripcion"]
+
+            total_eventos += eventos
+            total_horas   += horas_acum
+
+            # Duration in minutes or hours for legibility
+            if dur_repr >= 1:
+                dur_str = f"{dur_repr:.1f} hr"
+            elif dur_repr >= (1 / 60):
+                dur_str = f"{dur_repr * 60:.0f} min"
+            else:
+                dur_str = f"{dur_repr * 3600:.0f} seg"
+
+            rows_html += f"""
+            <tr>
+                <td><span class="cat-badge {badge_cls}">{label_txt}</span></td>
+                <td style="text-align:center; color:#e8e0d0; font-weight:600;">{eventos}</td>
+                <td style="text-align:center; color:#8892a4;">{dur_str}</td>
+                <td style="text-align:center; color:#f5a623; font-weight:600;">{horas_acum:.2f} hr</td>
+                <td style="color:#6b7585; font-size:0.72rem; font-family:'IBM Plex Sans',sans-serif;">{desc}</td>
+            </tr>
+            """
+
+        # Totals row
+        rows_html += f"""
+        <tr style="background:rgba(255,255,255,0.04);">
+            <td style="color:#c8bfae; font-weight:700; font-family:'IBM Plex Mono',monospace; font-size:0.72rem; text-transform:uppercase; letter-spacing:.05em;">TOTAL ANUAL</td>
+            <td style="text-align:center; color:#e8e0d0; font-weight:700;">{total_eventos}</td>
+            <td style="text-align:center; color:#8892a4;">—</td>
+            <td style="text-align:center; color:#f5a623; font-weight:700;">{total_horas:.2f} hr</td>
+            <td style="color:#8892a4; font-size:0.72rem; font-family:'IBM Plex Sans',sans-serif;">
+                Nivel de riesgo: <strong style="color:{'#ff6b6b' if nivel_lower=='alto' else '#f5a623' if nivel_lower=='medio' else '#4ecdc4'}">{nivel.upper()}</strong>
+                &nbsp;·&nbsp; Autonomía recomendada: <strong>{res_cortes.autonomia_recomendada_hrs:.0f} horas</strong>
+            </td>
+        </tr>
+        """
+
+        st.markdown(
+            f"""
+            <div class="impacto-section-wrap">
+                <div class="impacto-section-label">Historial CFE — Resumen estadístico anual</div>
+                <table class="impacto-table">
+                    <thead>
+                        <tr>
+                            <th style="width:22%;">Categoría</th>
+                            <th style="width:10%; text-align:center;">Eventos / año</th>
+                            <th style="width:14%; text-align:center;">Duración repr.</th>
+                            <th style="width:14%; text-align:center;">Horas desabasto</th>
+                            <th>Impacto operativo</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )

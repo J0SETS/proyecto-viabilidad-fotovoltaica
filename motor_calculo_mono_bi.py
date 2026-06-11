@@ -13,28 +13,31 @@ from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
 # CATÁLOGO DE PANELES
 # =============================================================================
 
+# =============================================================================
+# CATÁLOGO DE PANELES
+# =============================================================================
+
 PANELES = {
     "monofacial": {
         "nombre": "Monofacial",
         "fabricante": "Jinko Solar",
         "modelo": "Tiger Neo 72HC — JKM605N-72HL4",
         "potencia_w": 605,
-        "potencia_pico_dc": 399_300.0,
         "gamma_pdc": -0.0029,
         "bifacial": False,
+        "area_m2": 2.58,  # Dimensiones aprox: 2.278m x 1.134m
     },
     "bifacial_jinko": {
         "nombre": "Bifacial",
         "fabricante": "Jinko Solar",
         "modelo": "Tiger Neo N-type — JKM625N-78HL4-BDV",
         "potencia_w": 625,
-        "potencia_pico_dc": 399_300.0,
         "gamma_pdc": -0.0029,
         "bifacial": True,
         "gb_default": 0.15,
+        "area_m2": 2.79,  # Dimensiones aprox: 2.465m x 1.134m
     },
 }
-
 
 # =============================================================================
 # FUNCIONES DE CLIMA HISTÓRICO
@@ -309,6 +312,7 @@ def calcular_viabilidad(
     weather_start_date: str = "2025-01-01",
     weather_end_date: str = "2025-12-31",
     df_clima_horario: pd.DataFrame | None = None,
+    num_paneles: int = 1, # NUEVO PARÁMETRO
 ):
     # 1. SELECCIÓN DE PANEL
     if tipo_panel not in PANELES:
@@ -378,8 +382,8 @@ def calcular_viabilidad(
 
     # 7. MODELADO ENERGÉTICO CON Y SIN PENALIZACIÓN TÉRMICA
     gamma_pdc = panel["gamma_pdc"]
-    potencia_pico_dc = panel["potencia_pico_dc"]
-
+    potencia_pico_dc = panel["potencia_w"] * num_paneles
+    
     if panel["bifacial"]:
         gb_efectivo = float(np.clip(gb, 0.0, 1.0))
         potencia_ef_dc = potencia_pico_dc * (1.0 + gb_efectivo)
@@ -452,3 +456,86 @@ def calcular_viabilidad(
         "Demanda_Post_Inyeccion_Solar_kW",
     ]
     return df_motor[columnas_salida], energia_anual
+
+
+import math
+
+import math
+
+def dimensionar_y_simular(
+    lat: float,
+    lon: float,
+    altura: float,
+    tipo_demanda: str,
+    kwh_mensuales: list,
+    kwh_anual: float,
+    tilt: float,
+    acimut_usuario: float,
+    tipo_panel: str = "monofacial",
+    gb: float = 0.15,
+    usar_clima_historico: bool = True,
+    weather_start_date: str = "2025-01-01",
+    weather_end_date: str = "2025-12-31",
+    df_clima_horario: pd.DataFrame | None = None,
+    porcentaje_cobertura: float = 1.0  # 1.0 = Cubrir el 100% de la demanda
+):
+    """
+    Dimensiona la cantidad de paneles requeridos para cubrir la demanda indicada,
+    calcula el área necesaria y ejecuta la simulación del sistema.
+    """
+    # 1. Determinar el objetivo de generación anual
+    if tipo_demanda != "Anual":
+        demanda_objetivo = sum(kwh_mensuales) * porcentaje_cobertura
+    else:
+        demanda_objetivo = kwh_anual * porcentaje_cobertura
+
+    if demanda_objetivo <= 0:
+        raise ValueError("La demanda anual objetivo debe ser mayor a 0 para dimensionar el sistema.")
+
+    # 2. Primera pasada: Simular el rendimiento de 1 solo panel
+    _, energia_1_panel = calcular_viabilidad(
+        lat=lat, lon=lon, altura=altura,
+        tipo_demanda=tipo_demanda, kwh_mensuales=kwh_mensuales, kwh_anual=kwh_anual,
+        tilt=tilt, acimut_usuario=acimut_usuario,
+        tipo_panel=tipo_panel, gb=gb,
+        usar_clima_historico=usar_clima_historico,
+        weather_start_date=weather_start_date, weather_end_date=weather_end_date,
+        df_clima_horario=df_clima_horario,
+        num_paneles=1 # Forzamos 1 panel
+    )
+
+    if energia_1_panel <= 0:
+        raise RuntimeError("La simulación de 1 panel resultó en 0 kWh. Revisa la ubicación, tilt o datos climáticos.")
+
+    # 3. Dimensionamiento matemático
+    # Redondeamos hacia arriba para asegurar la cobertura de la demanda
+    num_paneles_requeridos = math.ceil(demanda_objetivo / energia_1_panel)
+
+    
+    # 4. Segunda pasada: Simular el sistema real dimensionado
+    df_motor_final, energia_anual_final = calcular_viabilidad(
+        lat=lat, lon=lon, altura=altura,
+        tipo_demanda=tipo_demanda, kwh_mensuales=kwh_mensuales, kwh_anual=kwh_anual,
+        tilt=tilt, acimut_usuario=acimut_usuario,
+        tipo_panel=tipo_panel, gb=gb,
+        usar_clima_historico=usar_clima_historico,
+        weather_start_date=weather_start_date, weather_end_date=weather_end_date,
+        df_clima_horario=df_clima_horario,
+        num_paneles=num_paneles_requeridos # Usamos los paneles calculados
+    )
+
+    potencia_instalada_kwp = (PANELES[tipo_panel]["potencia_w"] * num_paneles_requeridos) / 1000.0
+    
+    # NUEVO: Cálculo del área total
+    area_unitaria = PANELES[tipo_panel].get("area_m2", 2.5) # 2.5 es un fallback por seguridad
+    area_total_m2 = num_paneles_requeridos * area_unitaria
+
+    # 5. Entregar resultados completos
+    return {
+        "num_paneles": num_paneles_requeridos,
+        "potencia_instalada_kwp": potencia_instalada_kwp,
+        "area_total_m2": float(area_total_m2),
+        "demanda_objetivo_kwh": demanda_objetivo,
+        "generacion_estimada_kwh": energia_anual_final, # Corregido el typo aquí
+        "df_simulacion": df_motor_final
+    }
