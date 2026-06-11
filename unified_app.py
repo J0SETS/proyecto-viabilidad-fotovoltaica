@@ -22,6 +22,8 @@ from motor_calculo_mono_bi import (
 
 # Importamos el motor de cálculo BESS
 from baterias import MotorBESS
+from analisis_financiero import InputsFinancieros, calcular_cashflow_20_anios, fmt_mxn, fmt_anios
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CATÁLOGOS Y CONSTANTES DE UI
@@ -298,7 +300,7 @@ if st.session_state.get("sim_ok"):
     res_cortes = st.session_state["res_cortes"]
     bess_specs = st.session_state["bess_specs"]
 
-    tab_solar, tab_bess = st.tabs(["☀️ Análisis Solar y Térmico", "🔋 Almacenamiento y Resiliencia (BESS)"])
+    tab_solar, tab_bess, tab_fin = st.tabs(["☀️ Análisis Solar y Térmico", "🔋 Almacenamiento y Resiliencia (BESS)", "💵 Análisis financiero"])
 
     # =========================================================================
     # TAB 1 — ANÁLISIS SOLAR Y TÉRMICO
@@ -508,3 +510,213 @@ if st.session_state.get("sim_ok"):
             </div>
             """, unsafe_allow_html=True
         )
+        
+    with tab_fin:
+
+        st.markdown("### Parámetros Financieros del Proyecto")
+    
+        with st.form("form_financiero"):
+            fc1, fc2, fc3 = st.columns(3)
+    
+            capex = fc1.number_input(
+                "CAPEX — Inversión Inicial (MXN)",
+                value=float(
+                    res_solar.get("num_paneles", 0) * 4_500          # ~$4,500 MXN/panel como placeholder
+                    + res_dim.unidades_bess * 850_000                 # ~$850K MXN/gabinete Sungrow placeholder
+                ),
+                step=50_000.0, format="%.0f",
+                help="Costo total de equipos + ingeniería + instalación.",
+            )
+            opex = fc1.number_input(
+                "OPEX — Mantenimiento Anual (MXN)",
+                value=max(capex * 0.01, 20_000.0),
+                step=5_000.0, format="%.0f",
+                help="Limpieza, revisiones, seguros, monitoreo.",
+            )
+    
+            perdidas_apagon = fc2.number_input(
+                "Pérdidas por Apagones (MXN/año)",
+                value=float(res_cortes.impacto_anual_estimado.get("largos", {}).get("horas_desabasto_acumuladas", 0) * 50_000),
+                step=10_000.0, format="%.0f",
+                help="Pérdida económica estimada por paros de producción / daños.",
+            )
+            tarifa_cfe = fc2.number_input(
+                "Tarifa CFE Actual (MXN/kWh)",
+                value=2.85, step=0.05, format="%.2f",
+                help="Tarifa media tensión GDMTH o equivalente.",
+            )
+    
+            inflacion_tarifa = fc3.slider(
+                "Inflación Tarifaria Anual (%)", 4, 15, 8,
+                help="Incremento histórico promedio CFE: 7–10 % anual.",
+            ) / 100.0
+            degradacion = fc3.slider(
+                "Degradación Anual de Paneles (%)", 0, 2, 1,
+                help="Típico LID + degradación lineal: 0.5 – 0.7 % / año.",
+            ) / 100.0 / 2   # el slider va de 0–2 en pasos de 0.5 implícito
+    
+            boton_fin = st.form_submit_button("📊 Calcular ROI", use_container_width=True)
+    
+        if boton_fin:
+            consumo_cubierto = res_solar.get("generacion_estimada_kwh", 0.0)
+    
+            inputs_fin = InputsFinancieros(
+                capex_mxn=capex,
+                opex_anual_mxn=opex,
+                perdidas_apagon_mxn=perdidas_apagon,
+                tarifa_cfe_mxn_kwh=tarifa_cfe,
+                consumo_cubierto_kwh=consumo_cubierto,
+                inflacion_tarifa_pct=inflacion_tarifa,
+                degradacion_panel_pct=degradacion,
+                horizonte_anios=20,
+            )
+    
+            df_cf, roi_anios = calcular_cashflow_20_anios(inputs_fin)
+            st.session_state["df_cf"]    = df_cf
+            st.session_state["roi_anios"] = roi_anios
+            st.session_state["capex_fin"] = capex
+    
+        if "df_cf" in st.session_state:
+            df_cf    = st.session_state["df_cf"]
+            roi_anios = st.session_state["roi_anios"]
+            capex_fin = st.session_state["capex_fin"]
+    
+            # ── MÉTRICAS RESUMEN ─────────────────────────────────────────────────
+            van_20 = df_cf["Flujo_Acumulado_MXN"].iloc[-1]
+            ahorro_total = df_cf["Ahorro_Tarifa_MXN"].sum() + df_cf["Ahorro_Apagones_MXN"].sum()
+            opex_total   = df_cf["OPEX_MXN"].sum()
+    
+            mf1, mf2, mf3, mf4 = st.columns(4)
+            mf1.metric("Inversión Inicial",        fmt_mxn(capex_fin))
+            mf2.metric("Payback (ROI)",            fmt_anios(roi_anios))
+            mf3.metric("Valor Neto a 20 años",     fmt_mxn(van_20),
+                    delta="positivo" if van_20 >= 0 else "negativo",
+                    delta_color="normal" if van_20 >= 0 else "inverse")
+            mf4.metric("Ahorro Acumulado Bruto",   fmt_mxn(ahorro_total))
+    
+            st.markdown("---")
+    
+            col_roi, col_bar = st.columns(2)
+    
+            # ── GRÁFICA 1: Curva de Flujo Acumulado (ROI) ───────────────────────
+            with col_roi:
+                st.markdown("### Curva de Recuperación de Inversión")
+    
+                acum_con_capex = [-capex_fin] + df_cf["Flujo_Acumulado_MXN"].tolist()
+                anios_eje      = list(range(0, 21))
+    
+                color_acum = [
+                    "#ff6b6b" if v < 0 else "#4ecdc4"
+                    for v in acum_con_capex
+                ]
+    
+                fig_roi = go.Figure()
+    
+                # Zona de pérdida / ganancia
+                fig_roi.add_hrect(
+                    y0=min(acum_con_capex) * 1.05, y1=0,
+                    fillcolor="rgba(231,76,60,0.06)", line_width=0,
+                )
+                fig_roi.add_hrect(
+                    y0=0, y1=max(acum_con_capex) * 1.05,
+                    fillcolor="rgba(78,205,196,0.06)", line_width=0,
+                )
+    
+                # Línea de recuperación cero
+                fig_roi.add_hline(y=0, line=dict(color="#2a3040", width=1.5, dash="dot"))
+    
+                # Marcador ROI vertical
+                if roi_anios != float("inf"):
+                    fig_roi.add_vline(
+                        x=roi_anios,
+                        line=dict(color="#f5a623", width=1.5, dash="dash"),
+                        annotation_text=f"ROI ≈ {roi_anios:.1f} años",
+                        annotation_font=dict(color="#f5a623", size=10, family="IBM Plex Mono"),
+                        annotation_position="top left",
+                    )
+    
+                # Área rellena bajo la curva
+                fig_roi.add_trace(go.Scatter(
+                    x=anios_eje, y=acum_con_capex,
+                    fill="tozeroy",
+                    fillcolor="rgba(78,205,196,0.08)",
+                    line=dict(color="#4ecdc4", width=2.5),
+                    mode="lines+markers",
+                    marker=dict(color=color_acum, size=7, line=dict(color="#0f1117", width=1)),
+                    name="Flujo Acumulado",
+                    hovertemplate="Año %{x}<br>Acumulado: $%{y:,.0f} MXN<extra></extra>",
+                ))
+    
+                fig_roi.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f",
+                    font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+                    xaxis=dict(title="Año", gridcolor="#1e2535", linecolor="#2a3040", dtick=2),
+                    yaxis=dict(title="MXN", gridcolor="#1e2535", linecolor="#2a3040",
+                            tickformat="$,.0f"),
+                    height=380, margin=dict(l=70, r=20, t=30, b=50),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_roi, use_container_width=True)
+    
+            # ── GRÁFICA 2: Barras de Cashflow Anual ─────────────────────────────
+            with col_bar:
+                st.markdown("### Desglose de Flujo de Caja Anual")
+    
+                anios_str = [str(a) for a in df_cf["Año"]]
+                bar_colors = [
+                    "#4ecdc4" if v >= 0 else "#ff6b6b"
+                    for v in df_cf["Flujo_Neto_MXN"]
+                ]
+    
+                fig_bar = go.Figure()
+    
+                fig_bar.add_trace(go.Bar(
+                    x=anios_str, y=df_cf["Ahorro_Tarifa_MXN"],
+                    name="Ahorro Tarifa CFE",
+                    marker_color="#f5a623",
+                    hovertemplate="Año %{x}<br>Ahorro Tarifa: $%{y:,.0f}<extra></extra>",
+                ))
+                fig_bar.add_trace(go.Bar(
+                    x=anios_str, y=df_cf["Ahorro_Apagones_MXN"],
+                    name="Ahorro Apagones",
+                    marker_color="#4ecdc4",
+                    hovertemplate="Año %{x}<br>Ahorro Apagones: $%{y:,.0f}<extra></extra>",
+                ))
+                fig_bar.add_trace(go.Bar(
+                    x=anios_str, y=-df_cf["OPEX_MXN"],
+                    name="OPEX (egreso)",
+                    marker_color="#ff6b6b",
+                    hovertemplate="Año %{x}<br>OPEX: $%{y:,.0f}<extra></extra>",
+                ))
+                fig_bar.add_trace(go.Scatter(
+                    x=anios_str, y=df_cf["Flujo_Neto_MXN"],
+                    name="Flujo Neto",
+                    mode="lines+markers",
+                    line=dict(color="#e8e0d0", width=2, dash="dot"),
+                    marker=dict(size=5),
+                    hovertemplate="Año %{x}<br>Flujo Neto: $%{y:,.0f}<extra></extra>",
+                ))
+    
+                fig_bar.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#12171f",
+                    font=dict(family="IBM Plex Mono", color="#8892a4", size=11),
+                    barmode="relative",
+                    xaxis=dict(title="Año", gridcolor="#1e2535", linecolor="#2a3040"),
+                    yaxis=dict(title="MXN", gridcolor="#1e2535", linecolor="#2a3040",
+                            tickformat="$,.0f"),
+                    height=380, margin=dict(l=70, r=20, t=30, b=50),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="right", x=1, font=dict(size=10)),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+    
+            # ── TABLA DETALLADA ──────────────────────────────────────────────────
+            with st.expander("📋 Ver tabla de flujo de caja completa"):
+                df_display = df_cf.copy()
+                for col in ["Ahorro_Tarifa_MXN", "Ahorro_Apagones_MXN", "OPEX_MXN",
+                            "Flujo_Neto_MXN", "Flujo_Acumulado_MXN"]:
+                    df_display[col] = df_display[col].map(lambda v: f"${v:,.0f}")
+                df_display.columns = ["Año", "Ahorro Tarifa", "Ahorro Apagones",
+                                    "OPEX", "Flujo Neto", "Flujo Acumulado"]
+                st.dataframe(df_display, use_container_width=True, hide_index=True)

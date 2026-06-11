@@ -390,7 +390,7 @@ def calcular_viabilidad(
     else:
         potencia_ef_dc = potencia_pico_dc
 
-    temp_params = TEMPERATURE_MODEL_PARAMETERS["sapm"]["open_rack_glass_glass"]
+    temp_params = TEMPERATURE_MODEL_PARAMETERS["sapm"]["close_mount_glass_glass"]
     df_motor["Temperatura_Celda_C"] = pvlib.temperature.sapm_cell(
         poa_global=df_motor["Gtot_POA_Wm2"],
         temp_air=df_motor["Temperatura_Ambiente_C"],
