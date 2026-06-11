@@ -3,6 +3,7 @@
 # =============================================================================
 
 import traceback
+import json
 from datetime import date, timedelta
 
 import numpy as np
@@ -22,6 +23,14 @@ from motor_calculo_mono_bi import (
 
 # Importamos el motor de cálculo BESS
 from baterias import MotorBESS
+
+# Importamos la lógica financiera Streger
+from finanzas import (
+    COSTO_EVENTO_APAGON_MXN,
+    MITIGACION_BESS_UPS,
+    calcular_finanzas_desde_simulacion,
+    generar_resumen_financiero_streger,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CATÁLOGOS Y CONSTANTES DE UI
@@ -78,6 +87,235 @@ def get_tilt_optimo(lat, lon, altura):
 def get_clima_open_meteo_cached(lat, lon, start_date, end_date, timezone="America/Mexico_City"):
     """Cachea la descarga climática para no repetir la llamada a la API innecesariamente."""
     return descargar_clima_open_meteo(lat, lon, start_date, end_date, timezone)
+
+def _json_default(obj):
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    try:
+        return obj.item()
+    except AttributeError:
+        return str(obj)
+
+def _fmt_mxn(valor: float) -> str:
+    return f"${valor:,.0f} MXN"
+
+def _fmt_kwh(valor: float) -> str:
+    return f"{valor:,.0f} kWh"
+
+def _fmt_pct(valor) -> str:
+    if valor is None or pd.isna(valor):
+        return "No aplica"
+    return f"{valor * 100:.1f}%"
+
+def _escenarios_financieros_df(resumen: dict) -> pd.DataFrame:
+    etiquetas = {
+        "base_sin_fv_sin_bess": "Sin FV ni BESS",
+        "solo_fv": "Solo FV",
+        "solo_bess_ups": "Solo BESS/UPS",
+        "fv_mas_bess_ups": "FV + BESS/UPS",
+    }
+
+    filas = []
+    escenarios = resumen["comparacion_escenarios"]["escenarios"]
+    for clave, datos in escenarios.items():
+        roi = datos.get("roi_simple_anual")
+        filas.append(
+            {
+                "Escenario": etiquetas.get(clave, clave),
+                "Descripción": datos.get("descripcion", ""),
+                "Inversión (MXN)": float(datos.get("inversion_mxn", 0.0)),
+                "Beneficio anual (MXN)": float(datos.get("beneficio_anual_mxn", 0.0)),
+                "Payback simple (años)": datos.get("payback_anios"),
+                "ROI simple anual (%)": None if roi is None else float(roi) * 100.0,
+            }
+        )
+
+    return pd.DataFrame(filas)
+
+def _render_finanzas_streger(df_simulacion=None) -> None:
+    st.markdown("### Análisis financiero Streger")
+    st.caption(
+        "Modelo preliminar basado en recibo CFE GDMTO, escenarios de apagones "
+        "y ahorro FV por autoconsumo solar."
+    )
+
+    res_dim_default = st.session_state.get("res_dim")
+    carga_default = float(getattr(res_dim_default, "carga_critica_kw", 30.0))
+    horas_default = float(getattr(res_dim_default, "horas_respaldo", 4.0))
+
+    c1, c2 = st.columns(2)
+    inversion_fv_mxn = c1.number_input(
+        "Inversión FV en MXN",
+        min_value=0.0,
+        value=1_500_000.0,
+        step=50_000.0,
+        key="fin_inversion_fv_mxn",
+    )
+    inversion_bess_mxn = c2.number_input(
+        "Inversión BESS/UPS en MXN",
+        min_value=0.0,
+        value=1_200_000.0,
+        step=50_000.0,
+        key="fin_inversion_bess_mxn",
+    )
+
+    c3, c4 = st.columns(2)
+    carga_critica_kw_fin = c3.number_input(
+        "Carga crítica en kW",
+        min_value=0.0,
+        value=carga_default,
+        step=5.0,
+        key="fin_carga_critica_kw",
+    )
+    horas_respaldo_fin = c4.number_input(
+        "Horas de respaldo",
+        min_value=0.25,
+        value=horas_default,
+        step=0.25,
+        key="fin_horas_respaldo",
+    )
+
+    c5, c6 = st.columns(2)
+    escenario_costo = c5.selectbox(
+        "Escenario de costo de apagones",
+        options=list(COSTO_EVENTO_APAGON_MXN.keys()),
+        index=1,
+        key="fin_escenario_costo",
+    )
+    escenario_mitigacion = c6.selectbox(
+        "Escenario de mitigación",
+        options=list(MITIGACION_BESS_UPS.keys()),
+        index=1,
+        key="fin_escenario_mitigacion",
+    )
+
+    resumen = None
+    if df_simulacion is None:
+        st.warning("Primero ejecuta la simulación solar para calcular el ahorro por autoconsumo.")
+        usar_manual = st.checkbox(
+            "Usar estimación manual de energía autoconsumida anual",
+            value=False,
+            key="fin_usar_manual",
+        )
+        if not usar_manual:
+            return
+
+        energia_manual_kwh = st.number_input(
+            "Energía autoconsumida anual estimada (kWh)",
+            min_value=0.0,
+            value=50_000.0,
+            step=1_000.0,
+            key="fin_energia_manual_kwh",
+            help="Estimación manual; no usa el dataframe solar de la simulación.",
+        )
+        resumen = generar_resumen_financiero_streger(
+            escenario_costo_apagon=escenario_costo,
+            escenario_mitigacion=escenario_mitigacion,
+            carga_critica_kw=carga_critica_kw_fin,
+            horas_respaldo=horas_respaldo_fin,
+            energia_autoconsumida_kwh_anual=energia_manual_kwh,
+            inversion_fv_mxn=inversion_fv_mxn,
+            inversion_bess_mxn=inversion_bess_mxn,
+        )
+        resumen["simulacion_solar"] = {
+            "estimacion_manual": True,
+            "energia_autoconsumida_kwh_anual": energia_manual_kwh,
+            "energia_excedente_kwh_anual": None,
+            "lectura": "Estimación manual; no proviene del dataframe de simulación solar.",
+        }
+    else:
+        try:
+            resumen = calcular_finanzas_desde_simulacion(
+                df_simulacion=df_simulacion,
+                escenario_costo_apagon=escenario_costo,
+                escenario_mitigacion=escenario_mitigacion,
+                carga_critica_kw=carga_critica_kw_fin,
+                horas_respaldo=horas_respaldo_fin,
+                inversion_fv_mxn=inversion_fv_mxn,
+                inversion_bess_mxn=inversion_bess_mxn,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            st.info("Revisa que el dataframe tenga columnas de demanda y generación solar en kW.")
+            return
+
+    diagnostico = resumen["diagnostico_recibo"]
+    solar = resumen.get("simulacion_solar", {})
+    ahorro_solar = resumen["ahorro_solar_express"]
+    perdidas = resumen["perdidas_apagones"]
+    beneficio = resumen["beneficio_respaldo"]
+    bess = resumen["dimensionamiento_bess"]
+
+    st.markdown("---")
+    st.markdown("### Diagnóstico del recibo CFE GDMTO")
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Consumo mensual del recibo", _fmt_kwh(diagnostico["energia_kwh"]))
+    d2.metric("Demanda máxima", f"{diagnostico['demanda_maxima_kw']:,.1f} kW")
+    d3.metric("Precio medio total", f"${diagnostico['precio_medio_total_mxn_kwh']:,.2f} MXN/kWh")
+    d4.metric("Distribución + capacidad", _fmt_mxn(diagnostico["cargos_distribucion_capacidad_mxn"]))
+    st.info(diagnostico["lectura"])
+
+    st.markdown("### Resultados financieros anuales")
+    excedente_kwh = solar.get("energia_excedente_kwh_anual")
+    f1, f2, f3 = st.columns(3)
+    f1.metric("Energía solar autoconsumida", _fmt_kwh(solar["energia_autoconsumida_kwh_anual"]))
+    f2.metric("Excedente solar anual", _fmt_kwh(excedente_kwh) if excedente_kwh is not None else "No disponible")
+    f3.metric("Ahorro solar anual estimado", _fmt_mxn(ahorro_solar["ahorro_solar_anual_mxn"]))
+
+    f4, f5, f6 = st.columns(3)
+    f4.metric("Pérdida anual por apagones", _fmt_mxn(perdidas["perdida_anual_estimada_mxn"]))
+    f5.metric("Referencia anual Streger", _fmt_mxn(perdidas["perdida_anual_reportada_referencia_mxn"]))
+    f6.metric("Beneficio evitable BESS/UPS", _fmt_mxn(beneficio["beneficio_anual_evitable_mxn"]))
+
+    with st.expander("Dimensionamiento financiero preliminar BESS/UPS", expanded=False):
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Energía crítica", f"{bess['energia_critica_kwh']:,.0f} kWh")
+        b2.metric("Capacidad sugerida", f"{bess['capacidad_sugerida_kwh']:,.0f} kWh")
+        b3.metric("Baterías equivalentes", f"{bess['baterias_equivalentes']:,.2f}")
+        b4.metric("Una batería cubre potencia", "Sí" if bess["potencia_suficiente_una_bateria"] else "No")
+        st.caption(bess["lectura"])
+
+    st.markdown("### Comparación de escenarios financieros")
+    df_comp = _escenarios_financieros_df(resumen)
+    st.dataframe(
+        df_comp,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Inversión (MXN)": st.column_config.NumberColumn(format="$%0.0f"),
+            "Beneficio anual (MXN)": st.column_config.NumberColumn(format="$%0.0f"),
+            "Payback simple (años)": st.column_config.NumberColumn(format="%0.2f"),
+            "ROI simple anual (%)": st.column_config.NumberColumn(format="%0.1f%%"),
+        },
+    )
+    st.bar_chart(df_comp.set_index("Escenario")[["Beneficio anual (MXN)"]])
+
+    mejor = df_comp[df_comp["Escenario"] == "FV + BESS/UPS"].iloc[0]
+    r1, r2 = st.columns(2)
+    payback = mejor["Payback simple (años)"]
+    roi_pct = mejor["ROI simple anual (%)"]
+    r1.metric("Payback simple FV + BESS/UPS", "No aplica" if pd.isna(payback) else f"{payback:.2f} años")
+    r2.metric("ROI simple anual FV + BESS/UPS", _fmt_pct(None if pd.isna(roi_pct) else roi_pct / 100.0))
+
+    st.caption(solar.get("lectura", ""))
+
+    json_resumen = json.dumps(resumen, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8")
+    csv_escenarios = df_comp.to_csv(index=False).encode("utf-8-sig")
+    dl1, dl2 = st.columns(2)
+    dl1.download_button(
+        "Descargar resumen financiero JSON",
+        data=json_resumen,
+        file_name="resumen_financiero_streger.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    dl2.download_button(
+        "Descargar comparación CSV",
+        data=csv_escenarios,
+        file_name="comparacion_escenarios_financieros_streger.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURACIÓN STREAMLIT & ESTILOS
@@ -274,8 +512,10 @@ if boton_ejecutar:
             # ── 4. Guardar en Session State ──
             st.session_state.update({
                 "df_motor": df_motor,
+                "df_simulacion": df_motor,
                 "df_temp_mensual": df_temp_mensual,
                 "res_solar": resultados_solar,
+                "resultado_solar": resultados_solar,
                 "res_dim": res_dim,
                 "res_cortes": res_cortes,
                 "bess_specs": motor_bess.specs,
@@ -298,7 +538,11 @@ if st.session_state.get("sim_ok"):
     res_cortes = st.session_state["res_cortes"]
     bess_specs = st.session_state["bess_specs"]
 
-    tab_solar, tab_bess = st.tabs(["☀️ Análisis Solar y Térmico", "🔋 Almacenamiento y Resiliencia (BESS)"])
+    tab_solar, tab_bess, tab_finanzas = st.tabs([
+        "☀️ Análisis Solar y Térmico",
+        "🔋 Almacenamiento y Resiliencia (BESS)",
+        "Análisis financiero Streger",
+    ])
 
     # =========================================================================
     # TAB 1 — ANÁLISIS SOLAR Y TÉRMICO
@@ -508,3 +752,14 @@ if st.session_state.get("sim_ok"):
             </div>
             """, unsafe_allow_html=True
         )
+
+    # =========================================================================
+    # TAB 3 — ANÁLISIS FINANCIERO STREGER
+    # =========================================================================
+    with tab_finanzas:
+        _render_finanzas_streger(df_motor)
+
+else:
+    (tab_finanzas,) = st.tabs(["Análisis financiero Streger"])
+    with tab_finanzas:
+        _render_finanzas_streger(None)
