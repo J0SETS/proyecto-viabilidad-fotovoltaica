@@ -477,37 +477,36 @@ if st.session_state.get("sim_ok"):
             total_horas += horas_acum
             dur_str = f"{dur_repr:.1f} hr" if dur_repr >= 1 else (f"{dur_repr * 60:.0f} min" if dur_repr >= (1/60) else f"{dur_repr * 3600:.0f} seg")
             
-            rows_html += f"""
-            <tr>
-                <td><span class="cat-badge {badge_cls}">{label_txt}</span></td>
-                <td style="text-align:center; color:#e8e0d0; font-weight:600;">{eventos}</td>
-                <td style="text-align:center; color:#8892a4;">{dur_str}</td>
-                <td style="text-align:center; color:#f5a623; font-weight:600;">{horas_acum:.2f} hr</td>
-                <td style="color:#6b7585; font-size:0.72rem;">{desc}</td>
-            </tr>
-            """
+            # Nota cómo el HTML está pegado a la izquierda sin espacios
+            rows_html += f"""<tr>
+<td><span class="cat-badge {badge_cls}">{label_txt}</span></td>
+<td style="text-align:center; color:#e8e0d0; font-weight:600;">{eventos}</td>
+<td style="text-align:center; color:#8892a4;">{dur_str}</td>
+<td style="text-align:center; color:#f5a623; font-weight:600;">{horas_acum:.2f} hr</td>
+<td style="color:#6b7585; font-size:0.72rem;">{desc}</td>
+</tr>"""
 
-        rows_html += f"""
-        <tr style="background:rgba(255,255,255,0.04);">
-            <td style="color:#c8bfae; font-weight:700; font-size:0.72rem; text-transform:uppercase;">TOTAL ANUAL</td>
-            <td style="text-align:center; color:#e8e0d0; font-weight:700;">{total_eventos}</td>
-            <td style="text-align:center; color:#8892a4;">—</td>
-            <td style="text-align:center; color:#f5a623; font-weight:700;">{total_horas:.2f} hr</td>
-            <td style="color:#8892a4; font-size:0.72rem;">Autonomía recomendada: <strong>{res_cortes.autonomia_recomendada_hrs:.0f} horas</strong></td>
-        </tr>
-        """
+        # Fila de totales sin sangría
+        rows_html += f"""<tr style="background:rgba(255,255,255,0.04);">
+<td style="color:#c8bfae; font-weight:700; font-size:0.72rem; text-transform:uppercase;">TOTAL ANUAL</td>
+<td style="text-align:center; color:#e8e0d0; font-weight:700;">{total_eventos}</td>
+<td style="text-align:center; color:#8892a4;">—</td>
+<td style="text-align:center; color:#f5a623; font-weight:700;">{total_horas:.2f} hr</td>
+<td style="color:#8892a4; font-size:0.72rem;">Autonomía recomendada: <strong>{res_cortes.autonomia_recomendada_hrs:.0f} horas</strong></td>
+</tr>"""
 
+        # Contenedor final también pegado a la izquierda
         st.markdown(
             f"""
-            <div class="impacto-section-wrap">
-                <div class="impacto-section-label">Historial CFE — Resumen estadístico anual</div>
-                <table class="impacto-table">
-                    <thead>
-                        <tr><th style="width:22%;">Categoría</th><th style="width:10%; text-align:center;">Eventos / año</th><th style="width:14%; text-align:center;">Duración repr.</th><th style="width:14%; text-align:center;">Horas desabasto</th><th>Impacto operativo</th></tr>
-                    </thead>
-                    <tbody>{rows_html}</tbody>
-                </table>
-            </div>
+<div class="impacto-section-wrap">
+    <div class="impacto-section-label">Historial CFE — Resumen estadístico anual</div>
+    <table class="impacto-table">
+        <thead>
+            <tr><th style="width:22%;">Categoría</th><th style="width:10%; text-align:center;">Eventos / año</th><th style="width:14%; text-align:center;">Duración repr.</th><th style="width:14%; text-align:center;">Horas desabasto</th><th>Impacto operativo</th></tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+</div>
             """, unsafe_allow_html=True
         )
         
