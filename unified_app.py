@@ -38,6 +38,7 @@ ESTADOS_MEXICO = {
     "Yucatán (Mérida)": (20.9674, -89.6237, 10.0),
     "Baja California (Tijuana)": (32.5149, -117.0382, 20.0),
     "Sonora (Hermosillo)": (29.0729, -110.9559, 210.0),
+    "Veracruz (Streger)": (25.686, -100.3, 540.0)
 }
 
 MESES_STR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
