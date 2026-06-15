@@ -430,7 +430,59 @@ if st.session_state.get("sim_ok"):
             )
 
         df_vis = _filtrar_rango(df_motor, fecha_inicio, fecha_fin)
+        # ── GRÁFICO: DEMANDA ENERGÉTICA VS PRODUCCIÓN FV CORREGIDA TÉRMICAMENTE ─────
+        st.markdown("### Demanda Energética vs Producción Fotovoltaica Corregida Térmicamente")
 
+        fig_demanda_fv = _make_fig()
+
+        fig_demanda_fv.add_trace(
+            go.Scatter(
+                x=df_vis["Fecha_Hora"],
+                y=df_vis["Demanda_kW"],
+                name="Demanda energética (kW)",
+                mode="lines",
+                line=dict(color="#ff6b6b", width=1.8),
+            )
+        )
+
+        fig_demanda_fv.add_trace(
+            go.Scatter(
+                x=df_vis["Fecha_Hora"],
+                y=df_vis["Generacion_Solar_kW"],
+                name="Producción FV corregida térmicamente (kW)",
+                mode="lines",
+                fill="tozeroy",
+                line=dict(color="#ffe033", width=1.6),
+                fillcolor="rgba(255,224,51,0.12)",
+            )
+        )
+
+        fig_demanda_fv.add_trace(
+            go.Scatter(
+                x=df_vis["Fecha_Hora"],
+                y=df_vis["Demanda_Post_Inyeccion_Solar_kW"],
+                name="Demanda residual después de FV (kW)",
+                mode="lines",
+                line=dict(color="#4ecdc4", width=1.4, dash="dot"),
+            )
+        )
+
+        fig_demanda_fv.update_layout(
+            yaxis_title="Potencia (kW)",
+            xaxis_title="",
+            height=360,
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+            ),
+            margin=dict(l=60, r=25, t=40, b=35),
+        )
+
+        st.plotly_chart(fig_demanda_fv, use_container_width=True)
         # ── GRÁFICO 2: DEMANDA VS IRRADIANCIA (DOBLE EJE Y) ──────────────────
         fig1 = make_subplots(specs=[[{"secondary_y": True}]])
         fig1.add_trace(
