@@ -223,6 +223,49 @@ def calcular_tilt_optimo(lat: float, lon: float, altura: float) -> float:
 
     return float(best_tilt)
 
+def calcular_dia_tipico_horizontal(lat: float, lon: float, altura: float, fecha: str,
+                                    tilt: float = 0.0, acimut_usuario: float = 0.0,
+                                    panel_key: str = "monofacial"):
+    """
+    Irradiancia de cielo despejado (GHI, DNI, DHI) para un día específico y la
+    irradiancia POA + producción instantánea de un panel de referencia con la
+    orientación (tilt, acimut) indicada, evaluada a T_celda = 25 °C (sin corrección
+    térmica, sin dependencia de clima histórico).
+    """
+    tz = "America/Mexico_City"
+    tiempos = pd.date_range(start=f"{fecha} 00:00", end=f"{fecha} 23:45", freq="15min", tz=tz)
+
+    sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon)
+    airmass = pvlib.atmosphere.get_relative_airmass(sol["apparent_zenith"])
+    airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass, pvlib.atmosphere.alt2pres(altura))
+    cs = pvlib.clearsky.ineichen(
+        sol["apparent_zenith"], airmass_absolute=airmass_abs, linke_turbidity=3, altitude=altura,
+    )
+
+    # Misma convención que calcular_viabilidad: UI 0°=Sur -> pvlib 180°=Sur
+    acimut_pvlib = (acimut_usuario + 180) % 360
+    poa = pvlib.irradiance.get_total_irradiance(
+        surface_tilt=tilt, surface_azimuth=acimut_pvlib,
+        solar_zenith=sol["apparent_zenith"], solar_azimuth=sol["azimuth"],
+        dni=cs["dni"], ghi=cs["ghi"], dhi=cs["dhi"],
+    )["poa_global"].clip(lower=0).fillna(0)
+
+    panel = PANELES[panel_key]
+    pdc = pvlib.pvsystem.pvwatts_dc(
+        effective_irradiance=poa, temp_cell=25.0,
+        pdc0=panel["potencia_w"], gamma_pdc=panel["gamma_pdc"],
+    ).clip(lower=0)
+
+    df = pd.DataFrame({
+        "Hora": tiempos.tz_localize(None),
+        "GHI_Wm2": cs["ghi"].clip(lower=0).fillna(0).values,
+        "DNI_Wm2": cs["dni"].clip(lower=0).fillna(0).values,
+        "DHI_Wm2": cs["dhi"].clip(lower=0).fillna(0).values,
+        "POA_Wm2": poa.values,
+        "Potencia_Panel_W": pdc.values,
+    })
+    energia_kwh = float((df["Potencia_Panel_W"] / 1000.0 * 0.25).sum())
+    return df, energia_kwh
 
 def generar_perfil_demanda(
     tipo_demanda: str,

@@ -15,6 +15,7 @@ import streamlit as st
 from motor_calculo_mono_bi import (
     PANELES,
     calcular_tilt_optimo,
+    calcular_dia_tipico_horizontal,
     descargar_clima_open_meteo,
     resumen_penalizacion_temperatura_mensual,
     dimensionar_y_simular,
@@ -81,6 +82,10 @@ def get_tilt_optimo(lat, lon, altura):
 def get_clima_open_meteo_cached(lat, lon, start_date, end_date, timezone="America/Mexico_City"):
     """Cachea la descarga climática para no repetir la llamada a la API innecesariamente."""
     return descargar_clima_open_meteo(lat, lon, start_date, end_date, timezone)
+
+@st.cache_data(show_spinner=False)
+def get_dia_tipico(lat, lon, altura, fecha_str, tilt, acimut_usuario, panel_key="monofacial"):
+    return calcular_dia_tipico_horizontal(lat, lon, altura, fecha_str, tilt, acimut_usuario, panel_key)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURACIÓN STREAMLIT & ESTILOS
@@ -160,7 +165,7 @@ with st.sidebar:
 
     st.markdown("### 2. Orientación del Arreglo")
     tilt_opt = get_tilt_optimo(latitud, longitud, altura)
-    st.info(f"📐 Ángulo óptimo calculado: **{tilt_opt:.1f}°**")
+    st.info(f"📐 Ángulo óptimo calculado para un año: **{tilt_opt:.1f}°**")
 
     c_tilt, c_az = st.columns(2)
     tilt   = c_tilt.number_input("Inclinación (°)", value=float(tilt_opt), step=1.0)
@@ -227,6 +232,33 @@ with st.sidebar:
     st.markdown("---")
     boton_ejecutar = st.button("▶ Ejecutar Simulación Integral", use_container_width=True)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# VISTA RÁPIDA (SIEMPRE VISIBLE) — IRRADIANCIA DÍA TÍPICO + PRODUCCIÓN ESTIMADA
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("### ⚡ Vista Rápida — Irradiancia de Día Típico y Producción Estimada")
+
+df_dia, energia_dia_kwh = get_dia_tipico(latitud, longitud, altura, date.today().isoformat(), tilt, acimut)
+panel_default = PANELES["monofacial"]
+
+col_qv1, col_qv2 = st.columns([3, 1])
+
+with col_qv1:
+    fig_qv = _make_fig("Irradiancia de Cielo Despejado — GHI / DNI / DHI / POA")
+    fig_qv.add_trace(go.Scatter(x=df_dia["Hora"], y=df_dia["GHI_Wm2"], name="GHI", mode="lines", line=dict(color="#f5a623", width=1.5)))
+    fig_qv.add_trace(go.Scatter(x=df_dia["Hora"], y=df_dia["DNI_Wm2"], name="DNI", mode="lines", line=dict(color="#ff6b6b", width=1.5)))
+    fig_qv.add_trace(go.Scatter(x=df_dia["Hora"], y=df_dia["DHI_Wm2"], name="DHI", mode="lines", line=dict(color="#4ecdc4", width=1.5)))
+    fig_qv.add_trace(go.Scatter(x=df_dia["Hora"], y=df_dia["POA_Wm2"], name=f"POA (tilt {tilt:.0f}°, acimut {acimut:.0f}°)", mode="lines", line=dict(color="#ffe033", width=2)))
+    fig_qv.update_layout(yaxis_title="W/m²", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_qv, use_container_width=True)
+
+with col_qv2:
+    st.metric("Irradiancia pico (POA)", f"{df_dia['POA_Wm2'].max():,.0f} W/m²")
+    st.metric(f"Producción estimada ({panel_default['potencia_w']} W)", f"{energia_dia_kwh:.2f} kWh/día")
+    st.caption(
+        f"Panel de referencia: **{panel_default['modelo']}**, tilt = {tilt:.1f}°, acimut = {acimut:.1f}° "
+        f"(0°=Sur), T_celda = 25 °C (sin corrección térmica). Cielo despejado, Ineichen — "
+        f"{date.today().strftime('%d/%m/%Y')}."
+    )
 # ─────────────────────────────────────────────────────────────────────────────
 # EJECUCIÓN
 # ─────────────────────────────────────────────────────────────────────────────
